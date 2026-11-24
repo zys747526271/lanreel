@@ -23,6 +23,12 @@ const router = createRouter({
       meta: { title: '注册' },
     },
     {
+      path: '/forbidden',
+      name: 'forbidden',
+      component: () => import('@/views/ForbiddenView.vue'),
+      meta: { requiresAuth: true, title: '无访问权限' },
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),
@@ -95,7 +101,8 @@ router.beforeEach(async (to) => {
     return { path: '/login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : undefined }
   }
   if (to.meta.requiresAdmin && !auth.isAdmin) {
-    return { path: '/' }
+    // 不静默重定向：给出明确的权限说明与切换账号入口
+    return { path: '/forbidden', query: { from: to.fullPath } }
   }
   if ((to.path === '/login' || to.path === '/register') && auth.isLoggedIn) {
     return { path: '/' }

@@ -151,6 +151,9 @@ onMounted(async () => {
               {{ auth.user?.role === 'admin' ? '管理员' : '普通用户' }} ·
               {{ auth.isAdmin ? '可进入后台管理' : '可浏览与收藏' }}
             </p>
+            <p v-if="!auth.isAdmin" class="mt-1 text-[11px] text-white/30">
+              管理内容需要管理员账号（用户名见服务端 auth.username）
+            </p>
           </div>
           <div class="flex gap-2">
             <router-link
@@ -160,6 +163,13 @@ onMounted(async () => {
             >
               管理后台
             </router-link>
+            <span
+              v-else
+              class="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-white/35"
+              title="管理后台仅对管理员开放，请用管理员账号登录"
+            >
+              管理后台（无权限）
+            </span>
             <button
               class="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10"
               @click="signOut"
