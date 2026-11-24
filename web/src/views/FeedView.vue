@@ -323,17 +323,6 @@ onBeforeUnmount(() => {
           后台
         </router-link>
         <router-link
-          to="/settings"
-          class="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/55 backdrop-blur transition hover:bg-black/75"
-          title="设置"
-          aria-label="设置"
-        >
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a1.7 1.7 0 0 0-1.6-1H1.3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 3 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 3a1.7 1.7 0 0 0 1-1.6V1.3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 3c.6.3 1.3.2 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 9v.1c.3.6.9 1 1.6 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1Z" />
-          </svg>
-        </router-link>
-        <router-link
           v-if="!auth.isLoggedIn"
           to="/login"
           class="flex h-9 items-center rounded-full bg-white px-3 text-xs font-medium text-black transition hover:bg-white/90"
@@ -462,19 +451,6 @@ onBeforeUnmount(() => {
         </span>
         <span class="text-[10px] text-white/65" data-role="favorite-count">{{ favoriteCount }}</span>
       </button>
-      <router-link
-        :to="auth.isLoggedIn ? '/settings' : '/login'"
-        class="flex flex-col items-center gap-0.5"
-        title="信息 / 设置"
-      >
-        <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70">
-          <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
-            <circle cx="12" cy="12" r="9" />
-            <path d="M12 11v5m0-8.2v.1" />
-          </svg>
-        </span>
-        <span class="text-[10px] text-white/65">信息</span>
-      </router-link>
       <button class="flex flex-col items-center gap-0.5" title="下一个（↓）" @click="next">
         <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70 active:scale-90">
           <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -484,6 +460,22 @@ onBeforeUnmount(() => {
         <span class="text-[10px] text-white/65">下一个</span>
       </button>
     </div>
+
+    <!-- 设置入口移到左侧偏中，避免右侧操作栏堆叠过多按钮 -->
+    <router-link
+      v-if="currentItem && !feed.isEmpty"
+      :to="auth.isLoggedIn ? '/settings' : '/login'"
+      class="absolute left-3 top-[42%] z-30 flex flex-col items-center gap-0.5"
+      title="信息 / 设置"
+    >
+      <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70 active:scale-90">
+        <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a1.7 1.7 0 0 0-1.6-1H1.3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 3 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 3a1.7 1.7 0 0 0 1-1.6V1.3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 3c.6.3 1.3.2 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 9v.1c.3.6.9 1 1.6 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1Z" />
+        </svg>
+      </span>
+      <span class="text-[10px] text-white/65">设置</span>
+    </router-link>
 
     <!-- 信息条：抬高到控制条上方 -->
     <div

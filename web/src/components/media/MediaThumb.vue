@@ -4,8 +4,8 @@
  *
  *  - 服务端缩略图优先；HEAD 探测失败时自动懒抽首帧并缓存到 IndexedDB，
  *    卡片进入视口即生成，不需要用户触碰；
- *  - 悬停时用隐藏的 <video> 静音连续播放（不碰主播放器），canvas 每 ~120ms
- *    抽一帧显示在卡片上，进度条平滑推进，约 10s  preview 完一段片段；
+ *  - 悬停时用隐藏的 <video> 静音「分段跳播 + 段内快进」（不碰主播放器），
+ *    canvas 每 ~110ms 抽一帧，约 10s 内覆盖整条视频，进度条走完即到达末帧；
  *  - 抽到的帧作为封面回退缓存，下次打开网格直接显示。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -59,7 +59,6 @@ let observer: IntersectionObserver | null = null
 let hoverTimer: number | null = null
 let previewVideo: HTMLVideoElement | null = null
 let previewRaf = 0
-let previewTimer: number | null = null
 let previewStopped = false
 let cachedThisHover = false
 
@@ -210,10 +209,8 @@ function stopPreview() {
   previewStopped = true
   if (hoverTimer !== null) window.clearTimeout(hoverTimer)
   if (previewRaf) cancelAnimationFrame(previewRaf)
-  if (previewTimer !== null) window.clearInterval(previewTimer)
   hoverTimer = null
   previewRaf = 0
-  previewTimer = null
   previewing.value = false
   previewFrame.value = ''
   progress.value = 0
@@ -243,61 +240,70 @@ async function startPreview() {
       stopPreview()
       return
     }
-    // 约 10s 预览一段：长视频取 48s 片段，短视频按 1× 播完，速度不突兀。
-    const span = Math.min(Math.max(6, duration * 0.6), 48)
-    const rate = Math.max(1, Math.min(8, span / 10))
-    const start = Math.min(0.2, duration * 0.02)
-    el.currentTime = start
-    el.playbackRate = rate
-    const startedAt = performance.now()
-    let lastDraw = 0
-
-    const tick = (now: number) => {
-      if (previewStopped || disposed) return
-      if (now - lastDraw >= 120 && el.readyState >= 2 && el.videoWidth) {
-        lastDraw = now
-        const shot = grabFrame(el, 240)
-        if (shot) {
-          previewFrame.value = shot.data
-          if (!frame.value && !serverThumb.value) {
-            frame.value = shot.data
-            cacheFrame(shot.data)
-          }
-        }
-        progress.value = Math.min(1, Math.max(0, (el.currentTime - start) / span))
-      }
-      if (el.currentTime >= start + span || now - startedAt > 12000) {
-        stopPreview()
-        return
-      }
-      previewRaf = requestAnimationFrame(tick)
-    }
-
+    // 约 10s 内「分段跳播 + 段内快进」覆盖整条视频：
+    // 进度条从 0 走到 1 时，预览也正好到达最后一帧（长片不必真的快进播完）。
+    const PREVIEW_MS = 10000
+    const SEGMENTS = 12
+    const segmentMs = PREVIEW_MS / SEGMENTS
+    const lastTime = Math.max(0, duration - 0.06)
+    const segmentDur = lastTime / SEGMENTS
+    // 段内倍速：让每段播放时长接近 segmentMs，过长片段封顶 12×。
+    el.playbackRate = Math.max(1, Math.min(12, segmentDur / (segmentMs / 1000)))
+    let canPlay = true
     try {
       await el.play()
-      if (!previewStopped && !disposed) previewRaf = requestAnimationFrame(tick)
     } catch {
-      // 自动播放失败时退化为细步长 seek 预览（0.9s 一帧，比原来的 2s 更平滑）。
-      let step = 0
-      const total = 9
-      previewTimer = window.setInterval(() => {
-        if (previewStopped || disposed) return
-        const t = Math.min(duration - 0.06, start + (span * (step + 1)) / total)
-        void waitForSeek(el, t, 1200).then((ok) => {
-          if (!ok || previewStopped || disposed) return
-          const shot = grabFrame(el, 240)
-          if (shot) {
-            previewFrame.value = shot.data
-            if (!frame.value && !serverThumb.value) {
-              frame.value = shot.data
-              cacheFrame(shot.data)
-            }
+      canPlay = false
+    }
+
+    const paint = () => {
+      const shot = grabFrame(el, 240)
+      if (!shot) return
+      previewFrame.value = shot.data
+      if (!frame.value && !serverThumb.value) {
+        frame.value = shot.data
+        cacheFrame(shot.data)
+      }
+    }
+
+    for (let i = 0; i < SEGMENTS; i++) {
+      if (previewStopped || disposed) break
+      const segStart = Math.min(lastTime, i * segmentDur)
+      if (!(await waitForSeek(el, segStart, 1500))) break
+      await new Promise<void>((resolve) => {
+        const started = performance.now()
+        let lastDraw = 0
+        const tick = (now: number) => {
+          if (previewStopped || disposed) {
+            resolve()
+            return
           }
-          progress.value = (step + 1) / total
-        })
-        step += 1
-        if (step >= total) stopPreview()
-      }, 900)
+          const segRatio = Math.min(1, (now - started) / segmentMs)
+          // 自动播放失败时手动推进时间，仍然逐段覆盖全片。
+          if (!canPlay) el.currentTime = Math.min(lastTime, segStart + segmentDur * segRatio)
+          if (now - lastDraw >= 110) {
+            lastDraw = now
+            paint()
+          }
+          progress.value = (i + segRatio) / SEGMENTS
+          if (segRatio >= 1) {
+            resolve()
+            return
+          }
+          previewRaf = requestAnimationFrame(tick)
+        }
+        previewRaf = requestAnimationFrame(tick)
+      })
+    }
+
+    if (!previewStopped && !disposed) {
+      if (await waitForSeek(el, lastTime, 1500)) {
+        paint()
+        progress.value = 1
+        // 末帧停留一小会儿，让用户看到「播完」再收起预览。
+        await new Promise((r) => window.setTimeout(r, 350))
+      }
+      stopPreview()
     }
   } catch {
     stopPreview()

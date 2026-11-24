@@ -62,9 +62,13 @@ let suppressNextClick = false
 const seeking = ref(false)
 const seekRatio = ref(0)
 
-/** 倍速模式：非 null 表示正在使用手势倍速（点击提示按钮即可退出恢复 1×）。 */
+/** 倍速模式：非 null 表示正在使用手势倍速（底部提示按钮可退出恢复 1×）。 */
 const rateOverride = ref<number | null>(null)
+/** 中央倍速选择面板：右滑确认后才隐藏，随后只在底部保留恢复提示。 */
+const rateSelecting = ref(false)
+/** 当前指针是否正按在倍速选择状态上（用于区分纵向调速 / 右滑确认）。 */
 const rateDragging = ref(false)
+let rateConfirming = false
 const isFullscreen = ref(false)
 /** 恢复进度的待处理值，等元数据就绪后再 seek；只消费一次。 */
 let pendingResume = props.resumeTime ?? null
@@ -461,11 +465,13 @@ function clearPressTimer() {
   }
 }
 
-/** 长按 500ms 进入倍速模式。 */
+/** 进入倍速选择：中央半透明面板持续显示，直到右滑确认。 */
 function beginRateMode() {
   if (!props.active || !canRender.value) return
   longPressed = true
   swiping = false
+  rateConfirming = false
+  rateSelecting.value = true
   rateDragging.value = true
   rateStartY = lastY
   const currentIndex = Math.max(
@@ -488,10 +494,26 @@ function applyRateDrag(clientY: number) {
   }
 }
 
-/** 单击倍速提示按钮：退出倍速模式，恢复 1×（保持素材默认值由设置页决定）。 */
+/** 右滑确认倍速：中央选择面板消失，底部只留「恢复 1×」提示。 */
+function confirmRate() {
+  if (!rateSelecting.value) return
+  rateSelecting.value = false
+  rateDragging.value = false
+  rateConfirming = true
+  suppressNextClick = true
+  if (navigator.vibrate) navigator.vibrate(20)
+  logger.info('interaction', 'player', '确认倍速', {
+    video_key: props.item.key,
+    rate: effectiveRate.value,
+  })
+}
+
+/** 点击底部提示：退出倍速模式，恢复 1×（设置页默认值仍由 props.rate 决定）。 */
 function exitRateMode() {
   rateOverride.value = null
+  rateSelecting.value = false
   rateDragging.value = false
+  rateConfirming = false
   if (videoEl.value) videoEl.value.playbackRate = props.rate ?? 1
   logger.info('interaction', 'player', '退出倍速模式', { video_key: props.item.key })
 }
@@ -502,20 +524,41 @@ function onGestureDown(event: PointerEvent) {
   pointerId = event.pointerId
   startX = lastX = event.clientX
   startY = lastY = event.clientY
-  longPressed = false
-  swiping = false
-  rateDragging.value = false
-  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
   clearPressTimer()
-  pressTimer = window.setTimeout(beginRateMode, 500)
+  if (rateSelecting.value) {
+    // 面板仍在：再次按下直接进入调速/右滑确认，不再重新长按 500ms。
+    longPressed = true
+    swiping = false
+    rateConfirming = false
+    rateDragging.value = true
+    rateStartY = lastY
+    const currentIndex = Math.max(
+      0,
+      RATE_OPTIONS.findIndex((r) => r.value === effectiveRate.value),
+    )
+    rateStartIndex = currentIndex >= 0 ? currentIndex : 1
+  } else {
+    longPressed = false
+    swiping = false
+    rateDragging.value = false
+    pressTimer = window.setTimeout(beginRateMode, 500)
+  }
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
 }
 
 function onGestureMove(event: PointerEvent) {
   if (pointerId !== event.pointerId || !canInteract.value) return
   lastX = event.clientX
   lastY = event.clientY
-  if (rateDragging.value) {
+  if (rateConfirming) return // 已确认，等待抬起，期间不再切换视频
+  if (rateSelecting.value && rateDragging.value) {
     event.preventDefault()
+    const dx = event.clientX - startX
+    const dy = event.clientY - startY
+    if (dx > 44 && Math.abs(dx) > Math.abs(dy)) {
+      confirmRate()
+      return
+    }
     applyRateDrag(event.clientY)
     return
   }
@@ -530,10 +573,16 @@ function onGestureUp(event: PointerEvent) {
   clearPressTimer()
   if (pointerId !== event.pointerId) return
   pointerId = null
-  const finishRate = rateDragging.value
+  const inRateSelection = rateSelecting.value || rateDragging.value
   rateDragging.value = false
   ;(event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId)
-  if (finishRate) {
+  if (rateConfirming) {
+    rateConfirming = false
+    suppressNextClick = true
+    return
+  }
+  if (inRateSelection) {
+    // 松手不关闭中央面板，等用户右滑确认或点底部提示恢复。
     suppressNextClick = true
     return
   }
@@ -558,7 +607,9 @@ function onGestureCancel(event: PointerEvent) {
   if (pointerId !== event.pointerId) return
   pointerId = null
   rateDragging.value = false
+  rateConfirming = false
   swiping = false
+  // rateSelecting 保留：面板继续显示，用户可再次按下调速或右滑确认。
 }
 
 onBeforeUnmount(() => {
@@ -683,6 +734,15 @@ defineExpose({ togglePlay, seekBy, getCurrentTime, isPaused, getRate: () => effe
       </div>
     </transition>
 
+    <!-- 倍速选择面板：长按后居中半透明显示，右滑确认才消失（参考 mpvRx / webVideo） -->
+    <div
+      v-if="active && rateSelecting"
+      class="pointer-events-none absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/25 bg-black/45 px-7 py-5 text-center text-white shadow-xl backdrop-blur-md"
+    >
+      <div class="text-3xl font-semibold tracking-wide">{{ rateHint }}</div>
+      <div class="mt-1.5 text-[11px] text-white/70">上下滑动调速 · 右滑确认</div>
+    </div>
+
     <!-- 底部控制条：进度 / 时间 / 播放 / 静音 / 全屏 -->
     <div
       v-if="active && item.playable"
@@ -744,16 +804,16 @@ defineExpose({ togglePlay, seekBy, getCurrentTime, isPaused, getRate: () => effe
           <span v-else class="tabular-nums">图片 · {{ imageDuration }}s</span>
         </div>
         <div class="flex items-center gap-1.5">
-          <!-- 倍速提示放在底部控制条（视频下方），半透明且不遮挡画面；单击即恢复 1× -->
+          <!-- 右滑确认后才出现：底部恢复原速提示，半透明、单击即回 1× -->
           <button
-            v-if="rateOverride !== null"
+            v-if="rateOverride !== null && !rateSelecting"
             class="flex h-7 items-center gap-1 rounded-full border border-white/25 bg-black/40 px-2.5 text-[11px] text-white/90 backdrop-blur transition hover:bg-black/60 active:scale-95"
             :title="`当前 ${rateHint}，单击退出倍速模式并恢复 1×`"
             @pointerdown.stop
             @click.stop="exitRateMode"
           >
             <span class="font-semibold">{{ rateHint }}</span>
-            <span class="hidden text-[10px] text-white/55 sm:inline">点击恢复 1×</span>
+            <span class="text-[10px] text-white/55">恢复 1×</span>
           </button>
           <button
             class="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 backdrop-blur transition hover:bg-black/65 active:scale-90"
