@@ -1,0 +1,30 @@
+services:
+  lanreel:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: "0.1.0"
+    image: lanreel:0.1.0
+    container_name: lanreel
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 管理员初始密码：请改成自己的强密码，或改用 env_file 注入
+      ADMIN_INIT_PASSWORD: "ChangeMe@2026"
+      LANREEL_TIMEZONE: "Asia/Shanghai"
+      LANREEL_LOG_LEVEL: "info"
+      LANREEL_REGISTRATION_OPEN: "true"
+      GOMEMLIMIT: "200MiB"
+      GOMAXPROCS: "2"
+    volumes:
+      # 媒体目录：把宿主机的视频/图片目录挂载到 /media（只读更安全）
+      - /path/to/your/media:/media:ro
+      # 数据目录：业务库、日志库、JWT 密钥随卷持久化
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

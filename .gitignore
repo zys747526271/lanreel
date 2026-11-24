@@ -1,0 +1,35 @@
+# ---------- 构建产物 ----------
+/dist/
+server/bin/
+*.exe
+
+# ---------- 前端 ----------
+web/node_modules/
+web/dist/
+web/.vite/
+# 内嵌资源由 make embed 生成，仅保留占位文件
+server/internal/webui/dist/*
+!server/internal/webui/dist/.gitkeep
+
+# ---------- 运行时数据（数据库 / 日志 / 密钥 / 缩略图）----------
+server/data/
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.secret
+*.log
+
+# ---------- 本地配置（含密钥，禁止提交）----------
+server/config.yaml
+/config.yaml
+.env
+.env.local
+
+# ---------- 编辑器 / 系统 ----------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+node_modules/

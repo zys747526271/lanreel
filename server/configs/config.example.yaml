@@ -1,0 +1,52 @@
+# LanReel 服务端示例配置
+# 复制为 config.yaml 后修改；所有项均可用环境变量覆盖（见 README 部署说明）。
+server:
+  host: 0.0.0.0
+  port: 8080
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+  trusted_proxies: []
+
+media:
+  # 支持配置多个媒体根目录（F-06）
+  roots:
+    - "D:/Media"
+  video_extensions: [".mp4", ".webm", ".mov", ".m4v", ".ogv"]
+  image_extensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]
+  # 定时重扫间隔（秒），0 表示仅在启动时扫描
+  scan_interval_seconds: 60
+  # 图片自动切换停留时长（秒）
+  image_display_seconds: 5
+  ignored_dirs: [".git", "node_modules", "@eaDir", "#recycle"]
+
+database:
+  path: "./data/lanreel.db"
+
+logging:
+  path: "./data/logs.db"
+  fallback_dir: "./data/logs"
+  level: "info"
+  retention_days: 30
+  max_entries: 200000
+  frontend_upload_enabled: false
+
+auth:
+  # 管理员账号用户名
+  username: "admin"
+  # 初始密码建议用环境变量 ADMIN_INIT_PASSWORD 提供，不要提交到仓库
+  init_password: ""
+  # 留空则自动生成并保存到 {data_dir}/jwt.secret
+  jwt_secret: ""
+  access_ttl_minutes: 120
+  refresh_ttl_hours: 720
+
+app:
+  timezone: "Asia/Shanghai"
+  data_dir: "./data"
+  # 前端静态资源目录；留空则使用二进制内嵌资源
+  web_dir: ""
+  registration_open: true
+  # 媒体源标识，参与 video_key 计算
+  source_id: "local"

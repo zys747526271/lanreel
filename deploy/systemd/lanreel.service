@@ -1,0 +1,32 @@
+[Unit]
+Description=LanReel 局域网随机视频流服务
+Documentation=https://github.com/zys747526271/lanreel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 建议使用独立用户运行，并把媒体目录设为只读
+User=lanreel
+Group=lanreel
+WorkingDirectory=/opt/lanreel
+ExecStart=/opt/lanreel/lanreel --config /opt/lanreel/config.yaml
+
+# 资源限制（N-01 / N-02）：内存软上限与 CPU 核心数，避免与前台应用争抢
+Environment=GOMEMLIMIT=200MiB
+Environment=GOMAXPROCS=2
+# 管理员初始密码等敏感信息建议放入 EnvironmentFile
+EnvironmentFile=-/etc/lanreel/env
+
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# 基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/lanreel/data
+
+[Install]
+WantedBy=multi-user.target

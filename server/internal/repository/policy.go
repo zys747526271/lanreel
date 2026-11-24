@@ -1,0 +1,201 @@
+package repository
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"strings"
+
+	"github.com/zys747526271/lanreel/server/internal/models"
+)
+
+// ---------- 文件夹策略 ----------
+
+// ListFolderPolicies 返回全部文件夹策略。
+func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, folder_path, enabled, schedule_type, time_start, time_end, updated_at FROM folder_policies ORDER BY folder_path`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]models.FolderPolicy, 0, 16)
+	for rows.Next() {
+		var p models.FolderPolicy
+		var enabled int
+		var updated string
+		if err := rows.Scan(&p.ID, &p.FolderPath, &enabled, &p.ScheduleType, &p.TimeStart, &p.TimeEnd, &updated); err != nil {
+			return nil, err
+		}
+		p.Enabled = enabled == 1
+		p.UpdatedAt = parseTime(updated)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// UpsertFolderPolicy 新建或更新文件夹策略。
+func (s *Store) UpsertFolderPolicy(ctx context.Context, p models.FolderPolicy) (*models.FolderPolicy, error) {
+	now := s.now()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO folder_policies (folder_path, enabled, schedule_type, time_start, time_end, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(folder_path) DO UPDATE SET
+		   enabled = excluded.enabled, schedule_type = excluded.schedule_type,
+		   time_start = excluded.time_start, time_end = excluded.time_end, updated_at = excluded.updated_at`,
+		p.FolderPath, boolToInt(p.Enabled), p.ScheduleType, p.TimeStart, p.TimeEnd, now)
+	if err != nil {
+		return nil, err
+	}
+	var out models.FolderPolicy
+	var enabled int
+	var updated string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT id, folder_path, enabled, schedule_type, time_start, time_end, updated_at
+		 FROM folder_policies WHERE folder_path = ?`, p.FolderPath).
+		Scan(&out.ID, &out.FolderPath, &enabled, &out.ScheduleType, &out.TimeStart, &out.TimeEnd, &updated)
+	if err != nil {
+		return nil, err
+	}
+	out.Enabled = enabled == 1
+	out.UpdatedAt = parseTime(updated)
+	return &out, nil
+}
+
+// DeleteFolderPolicy 删除文件夹策略（恢复默认允许）。
+func (s *Store) DeleteFolderPolicy(ctx context.Context, folderPath string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM folder_policies WHERE folder_path = ?`, folderPath)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ---------- 文件级覆盖 ----------
+
+// GetFileOverride 查询单文件覆盖。
+func (s *Store) GetFileOverride(ctx context.Context, videoKey string) (*models.FileOverride, error) {
+	var o models.FileOverride
+	var enabled int
+	var updated string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, video_key, enabled, schedule_type, time_start, time_end, note, updated_at
+		 FROM file_overrides WHERE video_key = ?`, videoKey).
+		Scan(&o.ID, &o.VideoKey, &enabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	o.Enabled = enabled == 1
+	o.UpdatedAt = parseTime(updated)
+	return &o, nil
+}
+
+// ListFileOverrides 返回全部文件级覆盖（key → 覆盖）。
+func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOverride, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, video_key, enabled, schedule_type, time_start, time_end, note, updated_at FROM file_overrides`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]models.FileOverride{}
+	for rows.Next() {
+		var o models.FileOverride
+		var enabled int
+		var updated string
+		if err := rows.Scan(&o.ID, &o.VideoKey, &enabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated); err != nil {
+			return nil, err
+		}
+		o.Enabled = enabled == 1
+		o.UpdatedAt = parseTime(updated)
+		out[o.VideoKey] = o
+	}
+	return out, rows.Err()
+}
+
+// UpsertFileOverride 新建或更新文件级覆盖。
+func (s *Store) UpsertFileOverride(ctx context.Context, o models.FileOverride) (*models.FileOverride, error) {
+	now := s.now()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO file_overrides (video_key, enabled, schedule_type, time_start, time_end, note, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(video_key) DO UPDATE SET
+		   enabled = excluded.enabled, schedule_type = excluded.schedule_type,
+		   time_start = excluded.time_start, time_end = excluded.time_end,
+		   note = excluded.note, updated_at = excluded.updated_at`,
+		o.VideoKey, boolToInt(o.Enabled), o.ScheduleType, o.TimeStart, o.TimeEnd, o.Note, now)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetFileOverride(ctx, o.VideoKey)
+}
+
+// DeleteFileOverride 删除文件级覆盖（回落文件夹策略）。
+func (s *Store) DeleteFileOverride(ctx context.Context, videoKey string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM file_overrides WHERE video_key = ?`, videoKey)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// CountFileOverrides 统计文件级覆盖数量。
+func (s *Store) CountFileOverrides(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM file_overrides`).Scan(&n)
+	return n, err
+}
+
+// ---------- 设置 ----------
+
+// GetSetting 读取设置项。
+func (s *Store) GetSetting(ctx context.Context, key, def string) string {
+	var v string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM system_settings WHERE key = ?`, key).Scan(&v); err != nil {
+		return def
+	}
+	return v
+}
+
+// SetSetting 写入设置项。
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, s.now())
+	return err
+}
+
+// AllSettings 返回全部设置。
+func (s *Store) AllSettings(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM system_settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// NormalizeFolder 归一化文件夹相对路径。
+func NormalizeFolder(p string) string {
+	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
+	p = strings.TrimPrefix(p, "./")
+	p = strings.Trim(p, "/")
+	if p == "." {
+		return ""
+	}
+	return p
+}
