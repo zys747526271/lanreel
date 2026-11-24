@@ -17,3 +17,18 @@ export function fetchRandom(params: {
     signal: params.signal,
   })
 }
+
+/** 批量刷新条目的实时权限（收藏/历史存的是加入时的旧快照）。 */
+export interface MediaStatus {
+  key: string
+  playable: boolean
+  reason?: string
+}
+
+export function fetchMediaStatus(keys: string[]) {
+  return request<{ data: MediaStatus[] }>('/media/status', {
+    method: 'POST',
+    body: { keys },
+    quiet: true,
+  })
+}

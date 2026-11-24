@@ -28,7 +28,7 @@ const emit = defineEmits<{
 
       <!-- 视频角标 -->
       <span
-        v-if="item.media_type === 'video'"
+        v-if="item.media_type === 'video' && item.playable"
         class="pointer-events-none absolute left-1 top-1 rounded bg-black/65 px-1 py-0.5 text-[10px] text-white/90 backdrop-blur"
       >
         <svg class="inline h-3 w-3 -translate-y-px" viewBox="0 0 24 24" fill="currentColor">
@@ -37,15 +37,30 @@ const emit = defineEmits<{
         <span v-if="item.duration" class="ml-0.5">{{ formatDuration(item.duration) }}</span>
       </span>
 
-      <!-- 不可播放 -->
-      <span
-        v-if="!item.playable"
-        class="pointer-events-none absolute inset-x-1 bottom-1 rounded bg-black/65 px-1 py-0.5 text-center text-[10px] text-amber-200 backdrop-blur"
-      >
-        {{ reasonText(item.reason) }}
-      </span>
+      <!-- 不可播放：高斯模糊封面 + 暗色遮罩 + 居中提示（隐私遮挡） -->
+      <template v-if="!item.playable">
+        <div class="pointer-events-none absolute inset-0 bg-black/45"></div>
+        <div
+          class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1.5 px-2 text-center"
+        >
+          <svg
+            class="h-6 w-6 shrink-0 text-white/75"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+          >
+            <rect x="4" y="10.5" width="16" height="10" rx="2.5" />
+            <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
+          </svg>
+          <span class="text-[11px] font-medium leading-tight text-white/95">
+            {{ reasonText(item.reason) }}
+          </span>
+        </div>
+      </template>
 
       <span
+        v-if="item.playable"
         class="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100"
       >
         <span class="rounded-full bg-black/50 p-2.5 backdrop-blur">

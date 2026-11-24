@@ -3,6 +3,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import MediaGrid from '@/components/media/MediaGrid.vue'
+import { fetchMediaStatus } from '@/api/media'
 import { useAuthStore } from '@/stores/auth'
 import { reasonText } from '@/lib/format'
 import { logger } from '@/lib/logger'
@@ -30,7 +31,7 @@ const items = computed<MediaItem[]>(() =>
     duration: h.duration,
     size: 0,
     playable: h.playable,
-    reason: h.playable ? undefined : 'unavailable',
+    reason: h.playable ? undefined : h.reason ?? 'unavailable',
     favorite: false,
     stream_url: h.stream_url,
     thumb_url: h.thumb_url,
@@ -42,7 +43,25 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    entries.value = await listHistory(100)
+    const saved = await listHistory(100)
+    // 历史是本机快照：条目后来被管理员禁用 / 时段变化 / 文件丢失时，
+    // 必须以服务端实时判定刷新，才能对无权限内容做模糊遮挡和原因提示。
+    const keys = saved.map((h) => h.key).filter(Boolean)
+    if (keys.length) {
+      try {
+        const res = await fetchMediaStatus(keys)
+        const live = new Map(res.data.map((s) => [s.key, s]))
+        entries.value = saved.map((h) => {
+          const s = live.get(h.key)
+          return s ? { ...h, playable: s.playable, reason: s.reason } : h
+        })
+      } catch {
+        // 接口不可用时沿用本地快照，不阻塞历史页展示
+        entries.value = saved
+      }
+    } else {
+      entries.value = saved
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '读取观看历史失败'
     logger.warn('app', 'history', '读取观看历史失败', { error: error.value })

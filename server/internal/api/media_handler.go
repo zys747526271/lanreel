@@ -55,6 +55,43 @@ func (h *Handlers) handleRandomMedia(c *gin.Context) {
 	ok(c, items)
 }
 
+// handleMediaStatus POST /api/v1/media/status
+// 批量查询媒体当前的可播放状态。收藏 / 观看历史存的是加入时的快照，
+// 条目后来被管理员禁用或超出时段时，需要以此接口刷新才能正确显示模糊遮挡与原因。
+func (h *Handlers) handleMediaStatus(c *gin.Context) {
+	var req struct {
+		Keys []string `json:"keys"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_request", "请求格式错误")
+		return
+	}
+	if len(req.Keys) > 200 {
+		req.Keys = req.Keys[:200]
+	}
+	u := currentUser(c)
+	type statusView struct {
+		Key      string `json:"key"`
+		Playable bool   `json:"playable"`
+		Reason   string `json:"reason,omitempty"`
+	}
+	out := make([]statusView, 0, len(req.Keys))
+	for _, key := range req.Keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		item, found := h.media.Get(key)
+		if !found {
+			out = append(out, statusView{Key: key, Playable: false, Reason: models.ReasonFileMissing})
+			continue
+		}
+		d := h.media.Decide(c.Request.Context(), u, item)
+		out = append(out, statusView{Key: key, Playable: d.Playable, Reason: d.Reason})
+	}
+	ok(c, out)
+}
+
 // handleStream GET /api/v1/media/:key/stream
 // 使用 http.ServeContent 原生支持 Range 与条件请求（F-04 / N-07）。
 func (h *Handlers) handleStream(c *gin.Context) {

@@ -78,6 +78,7 @@ func (h *Handlers) Engine() *gin.Engine {
 		viewer.Use(h.optionalAuth())
 		{
 			viewer.GET("/media/random", h.handleRandomMedia)
+			viewer.POST("/media/status", h.handleMediaStatus)
 			viewer.GET("/media/:key/stream", h.handleStream)
 			viewer.GET("/media/:key/thumb", h.handleThumb)
 		}

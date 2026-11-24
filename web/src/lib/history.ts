@@ -15,6 +15,8 @@ export interface HistoryEntry {
   stream_url: string
   duration: number
   playable: boolean
+  /** 记录当时的权限原因；页面加载时会向服务端刷新为实时状态 */
+  reason?: string
   played_at: string
 }
 
@@ -30,6 +32,7 @@ export async function recordHistory(item: MediaItem): Promise<void> {
     stream_url: item.stream_url,
     duration: item.duration,
     playable: item.playable,
+    reason: item.reason,
     played_at: new Date().toISOString(),
   }
   try {

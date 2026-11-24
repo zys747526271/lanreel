@@ -5,7 +5,7 @@
  *
  * v0.2.0 交互补充：
  *  - 全屏按钮：整条画面进入全屏，视频/图片仍按原始比例（object-contain letterbox）；
- *  - 长按进入倍速模式，上下拖动选档；点击倍速提示按钮恢复 1× 并退出；
+ *  - 长按进入倍速（默认 1.5×），上下拖动选档、松手保持；点底部提示恢复原速；
  *  - 上下拖动（触摸/鼠标）切换条目；
  *  - 暴露 togglePlay / seekBy 供键盘控制（空格暂停、长按左右快进回退）。
  */
@@ -62,13 +62,12 @@ let suppressNextClick = false
 const seeking = ref(false)
 const seekRatio = ref(0)
 
-/** 倍速模式：非 null 表示正在使用手势倍速（底部提示按钮可退出恢复 1×）。 */
+/** 倍速模式：非 null 表示手势倍速已生效（底部提示按钮可退出恢复原速）。 */
 const rateOverride = ref<number | null>(null)
-/** 中央倍速选择面板：右滑确认后才隐藏，随后只在底部保留恢复提示。 */
+/** 中央倍速面板：仅按住调速期间显示，松手即收起，倍速保持生效（Kazumi 模式）。 */
 const rateSelecting = ref(false)
-/** 当前指针是否正按在倍速选择状态上（用于区分纵向调速 / 右滑确认）。 */
+/** 当前指针是否正按在面板上纵向调速。 */
 const rateDragging = ref(false)
-let rateConfirming = false
 const isFullscreen = ref(false)
 /** 恢复进度的待处理值，等元数据就绪后再 seek；只消费一次。 */
 let pendingResume = props.resumeTime ?? null
@@ -465,21 +464,27 @@ function clearPressTimer() {
   }
 }
 
-/** 进入倍速选择：中央半透明面板持续显示，直到右滑确认。 */
-function beginRateMode() {
+/**
+ * 长按进入倍速（参考 Kazumi）：
+ * - 首次长按默认 1.5×，不需要先右滑确认；
+ * - 已在倍速模式时再次长按则从当前倍速继续调节；
+ * - 中央面板只在按住期间显示，松手收起但倍速保持。
+ */
+function beginRateMode(adjustCurrent = false) {
   if (!props.active || !canRender.value) return
   longPressed = true
   swiping = false
-  rateConfirming = false
   rateSelecting.value = true
   rateDragging.value = true
   rateStartY = lastY
-  const currentIndex = Math.max(
-    0,
-    RATE_OPTIONS.findIndex((r) => r.value === effectiveRate.value),
-  )
-  rateStartIndex = currentIndex >= 0 ? currentIndex : 1
-  if (rateOverride.value === null) rateOverride.value = effectiveRate.value
+  if (adjustCurrent && rateOverride.value !== null) {
+    const index = RATE_OPTIONS.findIndex((r) => r.value === rateOverride.value)
+    rateStartIndex = index >= 0 ? index : 3
+  } else {
+    // Kazumi 默认：长按即 1.5×。
+    rateOverride.value = 1.5
+    rateStartIndex = Math.max(0, RATE_OPTIONS.findIndex((r) => r.value === 1.5))
+  }
   if (navigator.vibrate) navigator.vibrate(15)
 }
 
@@ -494,26 +499,11 @@ function applyRateDrag(clientY: number) {
   }
 }
 
-/** 右滑确认倍速：中央选择面板消失，底部只留「恢复 1×」提示。 */
-function confirmRate() {
-  if (!rateSelecting.value) return
-  rateSelecting.value = false
-  rateDragging.value = false
-  rateConfirming = true
-  suppressNextClick = true
-  if (navigator.vibrate) navigator.vibrate(20)
-  logger.info('interaction', 'player', '确认倍速', {
-    video_key: props.item.key,
-    rate: effectiveRate.value,
-  })
-}
-
-/** 点击底部提示：退出倍速模式，恢复 1×（设置页默认值仍由 props.rate 决定）。 */
+/** 点击底部提示：退出倍速模式，恢复设置页默认倍速（默认 1×）。 */
 function exitRateMode() {
   rateOverride.value = null
   rateSelecting.value = false
   rateDragging.value = false
-  rateConfirming = false
   if (videoEl.value) videoEl.value.playbackRate = props.rate ?? 1
   logger.info('interaction', 'player', '退出倍速模式', { video_key: props.item.key })
 }
@@ -525,24 +515,12 @@ function onGestureDown(event: PointerEvent) {
   startX = lastX = event.clientX
   startY = lastY = event.clientY
   clearPressTimer()
-  if (rateSelecting.value) {
-    // 面板仍在：再次按下直接进入调速/右滑确认，不再重新长按 500ms。
-    longPressed = true
-    swiping = false
-    rateConfirming = false
-    rateDragging.value = true
-    rateStartY = lastY
-    const currentIndex = Math.max(
-      0,
-      RATE_OPTIONS.findIndex((r) => r.value === effectiveRate.value),
-    )
-    rateStartIndex = currentIndex >= 0 ? currentIndex : 1
-  } else {
-    longPressed = false
-    swiping = false
-    rateDragging.value = false
-    pressTimer = window.setTimeout(beginRateMode, 500)
-  }
+  // 单击始终是暂停/播放；再次长按才进入调速（从当前倍速起调）。
+  longPressed = false
+  swiping = false
+  rateDragging.value = false
+  const adjustCurrent = rateOverride.value !== null
+  pressTimer = window.setTimeout(() => beginRateMode(adjustCurrent), 500)
   ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
 }
 
@@ -550,15 +528,9 @@ function onGestureMove(event: PointerEvent) {
   if (pointerId !== event.pointerId || !canInteract.value) return
   lastX = event.clientX
   lastY = event.clientY
-  if (rateConfirming) return // 已确认，等待抬起，期间不再切换视频
   if (rateSelecting.value && rateDragging.value) {
+    // 按住期间上下滑动选档；横向移动不再作为确认手势。
     event.preventDefault()
-    const dx = event.clientX - startX
-    const dy = event.clientY - startY
-    if (dx > 44 && Math.abs(dx) > Math.abs(dy)) {
-      confirmRate()
-      return
-    }
     applyRateDrag(event.clientY)
     return
   }
@@ -575,14 +547,10 @@ function onGestureUp(event: PointerEvent) {
   pointerId = null
   const inRateSelection = rateSelecting.value || rateDragging.value
   rateDragging.value = false
+  rateSelecting.value = false
   ;(event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId)
-  if (rateConfirming) {
-    rateConfirming = false
-    suppressNextClick = true
-    return
-  }
   if (inRateSelection) {
-    // 松手不关闭中央面板，等用户右滑确认或点底部提示恢复。
+    // Kazumi：松手即保持所选倍速，中央面板收起；点底部提示才恢复原速。
     suppressNextClick = true
     return
   }
@@ -607,9 +575,8 @@ function onGestureCancel(event: PointerEvent) {
   if (pointerId !== event.pointerId) return
   pointerId = null
   rateDragging.value = false
-  rateConfirming = false
+  rateSelecting.value = false
   swiping = false
-  // rateSelecting 保留：面板继续显示，用户可再次按下调速或右滑确认。
 }
 
 onBeforeUnmount(() => {
@@ -734,13 +701,13 @@ defineExpose({ togglePlay, seekBy, getCurrentTime, isPaused, getRate: () => effe
       </div>
     </transition>
 
-    <!-- 倍速选择面板：长按后居中半透明显示，右滑确认才消失（参考 mpvRx / webVideo） -->
+    <!-- 倍速选择面板：按住期间居中半透明显示，松手即收起但倍速保持（参考 Kazumi） -->
     <div
       v-if="active && rateSelecting"
       class="pointer-events-none absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/25 bg-black/45 px-7 py-5 text-center text-white shadow-xl backdrop-blur-md"
     >
       <div class="text-3xl font-semibold tracking-wide">{{ rateHint }}</div>
-      <div class="mt-1.5 text-[11px] text-white/70">上下滑动调速 · 右滑确认</div>
+      <div class="mt-1.5 text-[11px] text-white/70">上下滑动调速 · 松开保持</div>
     </div>
 
     <!-- 底部控制条：进度 / 时间 / 播放 / 静音 / 全屏 -->
@@ -804,16 +771,16 @@ defineExpose({ togglePlay, seekBy, getCurrentTime, isPaused, getRate: () => effe
           <span v-else class="tabular-nums">图片 · {{ imageDuration }}s</span>
         </div>
         <div class="flex items-center gap-1.5">
-          <!-- 右滑确认后才出现：底部恢复原速提示，半透明、单击即回 1× -->
+          <!-- 松手后倍速保持，底部半透明提示单击即恢复原速 -->
           <button
             v-if="rateOverride !== null && !rateSelecting"
             class="flex h-7 items-center gap-1 rounded-full border border-white/25 bg-black/40 px-2.5 text-[11px] text-white/90 backdrop-blur transition hover:bg-black/60 active:scale-95"
-            :title="`当前 ${rateHint}，单击退出倍速模式并恢复 1×`"
+            :title="`当前 ${rateHint}，单击退出倍速模式并恢复原速`"
             @pointerdown.stop
             @click.stop="exitRateMode"
           >
             <span class="font-semibold">{{ rateHint }}</span>
-            <span class="text-[10px] text-white/55">恢复 1×</span>
+            <span class="text-[10px] text-white/55">恢复原速</span>
           </button>
           <button
             class="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 backdrop-blur transition hover:bg-black/65 active:scale-90"

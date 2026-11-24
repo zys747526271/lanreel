@@ -2,9 +2,9 @@
 
 局域网随机视频流媒体系统：部署在 Windows / Linux（含 NAS）主机上，用浏览器以抖音式竖屏滑动方式浏览指定文件夹里的视频与图片，支持注册登录、跨设备收藏同步与管理员后台。
 
-**当前版本：v0.2.0（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
+**当前版本：v0.2.1（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
 
-下载：见 [Releases](https://github.com/zys747526271/lanreel/releases)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.2.0.md](./docs/releases/v0.2.0.md)。
+下载：见 [Releases](https://github.com/zys747526271/lanreel/releases)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.2.1.md](./docs/releases/v0.2.1.md)。
 
 <p>
   <img src="./docs/screenshots/setup-admin.png" width="240" alt="首次部署：创建管理员" />
@@ -257,7 +257,7 @@ cd web && npx vue-tsc --noEmit
 - 管理员接口额外校验 `role=admin`，越权与写操作均留痕
 - 局域网自签 HTTPS 即可；若要暴露公网，请走反向代理 + Let's Encrypt，不要直接开放端口
 
-## 验证情况（v0.2.0）
+## 验证情况（v0.2.1）
 
 - `go vet ./...` 无告警；`go test ./...`（media / policy / config）全部通过
 - 用 3 个样本媒体（1 视频 2 图片）实测：注册登录、随机流、视频自动播放、图片 5 秒切换、
@@ -265,6 +265,7 @@ cd web && npx vue-tsc --noEmit
   管理员绕过预览、后台六个页面渲染、日志分类检索、审计记录
 - 浏览器（Edge headless）端到端脚本跑完整流程，控制台零报错；390×844 / 430×932 / 1440×900 三档布局无重叠
 - v0.2.0 交互实测：设置页往返进度恢复、全屏比例、空格暂停、长按方向键快进、鼠标拖动切视频、长按倍速与点击退出、悬停抽帧封面、收藏/历史互切
+- v0.2.1 修复实测：历史无权限条目高强度高斯模糊 + 居中原因提示；长按默认 1.5×，上滑变 2×，松手面板消失但保持 2×，点击底部提示回 1×
 - 空闲内存 28MB（低于 N-01 的 50MB 目标）
 
 ## 文档
@@ -276,6 +277,7 @@ cd web && npx vue-tsc --noEmit
 | [docs/requirements/versions/v0.1.0.md](./docs/requirements/versions/v0.1.0.md) | 本版范围与验收标准 |
 | [docs/requirements/completed/v0.1.0.md](./docs/requirements/completed/v0.1.0.md) | 逐条需求完成情况（含实现位置与验证方式） |
 | [docs/releases/v0.2.0.md](./docs/releases/v0.2.0.md) | v0.2.0 发布说明 |
+| [docs/releases/v0.2.1.md](./docs/releases/v0.2.1.md) | v0.2.1 发布说明（修复版） |
 | [docs/requirements/backlog/v0.1.0.md](./docs/requirements/backlog/v0.1.0.md) | 遗留项、技术债与下版规划 |
 | [docs/requirements/changes/](./docs/requirements/changes/) | 需求变更记录（CR） |
 | [deploy/README.md](./deploy/README.md) | 部署、HTTPS、资源限制与排障 |
@@ -283,7 +285,8 @@ cd web && npx vue-tsc --noEmit
 ## 路线图
 
 - **v0.1.0**：Web 端完整可用，后台可管控，日志可诊断
-- **v0.2.0（当前）**：手势倍速、全屏按钮、鼠标/键盘控制、会话进度恢复、观看历史独立页、悬停抽帧封面
+- **v0.2.0**：手势倍速、全屏按钮、鼠标/键盘控制、会话进度恢复、观看历史独立页、悬停抽帧封面
+- **v0.2.1（当前）**：历史实时权限遮挡、Kazumi 式长按倍速（默认 1.5×、松手保持）
 - **更远**：PC 端 Tauri 套壳、手机 / 电视端客户端、多实例部署与 PostgreSQL 适配、日志远程聚合
 
 具体条目与前置条件见 [backlog](./docs/requirements/backlog/v0.1.0.md)。
