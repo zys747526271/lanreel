@@ -7,14 +7,15 @@
 <p>
   <img src="./docs/screenshots/setup-admin.png" width="240" alt="首次部署：创建管理员" />
   <img src="./docs/screenshots/feed-video.png" width="240" alt="浏览页：全屏竖滑 + 视频播放" />
-  <img src="./docs/screenshots/feed-favorites.png" width="240" alt="仅看收藏模式" />
+  <img src="./docs/screenshots/favorites-grid.png" width="240" alt="收藏夹：缩略图网格" />
   <img src="./docs/screenshots/admin-dashboard.png" width="620" alt="管理后台概览" />
 </p>
 
 ## 特性
 
 **浏览体验**
-- 全屏竖屏滑动（触摸 / 滚轮 / 键盘 ↑↓、空格），视频自动播放、离开即暂停
+- 全屏竖屏滑动（触摸 / 滚轮 / 键盘 ↑↓、空格），视频自动播放、离开即暂停，默认有声（被浏览器拦截时提示点击开启）
+- 进度条按下才跳转、按住可拖动，悬停不再误跳；收藏夹为缩略图网格，点开全屏滑动浏览
 - 图片按配置时长（默认 5 秒）自动切换，底部有停留进度提示
 - 视频支持拖拽进度、HTTP Range 断点续播，缓存头 `public, max-age=86400`
 - 「随机」与「仅收藏」两种浏览模式，一屏一媒体，切换零刷新
@@ -30,6 +31,11 @@
 - 收藏以「媒体源 + 相对路径」哈希标识，迁移文件夹不失效；服务端为准，跨设备即时同步
 - 前端用 IndexedDB 缓存收藏，断网时展示缓存并标记「离线」
 
+**账号与可见性**
+- 未登录即游客：直接输入 IP 就能看管理员开放的内容；登录后可见范围更大、可收藏
+- 每个文件夹/文件策略分别设置「普通用户可见」与「游客可见」，时间窗口共用；策略按媒体根隔离，多根下同名目录互不影响
+- 登录失败按 IP + 用户名双维度限流，超限返回 429 并记录告警
+
 **可诊断性**
 - 后端按 13 个分类写入独立的 `logs.db`（异步批量、失败降级文件），后台可按分类 / 级别 / 时间 / 关键字 / 请求 ID 检索
 - 前端按分类写入 IndexedDB `app_logs`，设置页可查看、导出（自动脱敏密码与 Token）
@@ -39,6 +45,8 @@
 - 单二进制（26MB，含前端），`CGO_ENABLED=0` 可交叉编译
 - 首次部署在浏览器内创建管理员，之后每次启动直接进主页（无浏览器可用 `ADMIN_INIT_PASSWORD` 预置）
 - 媒体目录可在后台「媒体目录」增删（内置目录浏览器），保存后立即热重扫，无需改配置或重启
+- 文件监听：目录内容变化 2 秒去抖后自动扫描（定时扫描仍作为兜底）
+- 服务端缩略图：图片由服务端缩放，视频用 ffmpeg 抽帧，收藏夹与后台列表不再只有占位图
 - 不做服务端转码、不缓存媒体本体；空闲内存实测 ~28MB
 - `GOMEMLIMIT` / `GOMAXPROCS` 通过环境变量注入，便于与前台游戏共存
 
@@ -61,7 +69,8 @@ cp server/configs/config.example.yaml config.yaml
   该页面只在实例尚未初始化时出现，之后的每次启动都直接进主页（未登录则到登录页）；
   创建成功后接口即失效，不会出现「谁先打开谁当管理员」。
 - **管理员**：用你创建的管理员账号登录，浏览页右上角出现「后台」，或从设置页「管理后台」进入 `/admin`。
-- **普通用户**：从登录页「注册」自助注册（管理员可在后台关闭该入口），只能浏览与收藏；
+- **游客**：直接访问即浏览，只能看策略里勾选「游客可见」的内容；收藏、设置等需要登录。
+- **普通用户**：从登录页「注册」自助注册（管理员可在后台关闭该入口），可浏览与收藏；
   访问 `/admin` 会进入权限说明页，提示当前账号与切换账号入口。
 
 无浏览器的部署（容器 / 自动化）仍可按配置预置管理员：启动时提供 `ADMIN_INIT_PASSWORD`，
@@ -151,6 +160,13 @@ cd web && npx vue-tsc --noEmit
 | 配置 | 说明 | 默认 |
 |------|------|------|
 | `media.roots` | 媒体根目录（可多个）；后台「媒体目录」保存后会覆盖此项 | `./media` |
+| `media.thumbnail_enabled` | 是否生成缩略图 | `true` |
+| `media.thumbnail_width` | 缩略图宽度（像素），高度按比例 | `480` |
+| `media.ffmpeg_path` | ffmpeg 路径；留空在 PATH 与程序目录查找（缺失时跳过视频缩略图） | 空 |
+| `media.watch_enabled` | 是否启用文件系统监听 | `true` |
+| `media.watch_max_dirs` | 监听目录上限，超过则退回定时扫描 | `4096` |
+| `auth.login_max_attempts` | 登录失败次数上限（窗口内） | `5` |
+| `auth.login_lock_minutes` | 触发限流后的锁定时长（分钟） | `5` |
 | `media.scan_interval_seconds` | 定时重扫间隔，0 表示仅启动扫描 | `60` |
 | `media.image_display_seconds` | 图片停留秒数 | `5` |
 | `app.timezone` | 时区（影响时间窗口与日志时间） | `Asia/Shanghai` |
@@ -172,11 +188,11 @@ cd web && npx vue-tsc --noEmit
 | 初始化 | `GET /setup/status`、`POST /setup/admin`（仅在未初始化时生效，创建第一个管理员） |
 | 公开 | `GET /health`、`GET /config/public`、`POST /auth/register`、`POST /auth/login` |
 | 认证 | `POST /auth/refresh`、`POST /auth/logout`、`GET /auth/me` |
-| 媒体 | `GET /media/random?limit=&exclude=&mode=`、`GET /media/:key/stream`、`GET /media/:key/thumb` |
+| 媒体 | `GET /media/random?limit=&exclude=&mode=`、`GET /media/:key/stream`、`GET /media/:key/thumb`（均支持游客，带失效令牌返回 401） |
 | 收藏 | `GET /favorites`、`POST /favorites`、`DELETE /favorites/:key` |
 | 日志 | `POST /logs/client`（前端日志上报，默认关闭） |
 
-### 管理接口（需 `role=admin`，共 26 个）
+### 管理接口（需 `role=admin`，共 28 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -203,6 +219,8 @@ cd web && npx vue-tsc --noEmit
 | PUT | `/admin/settings/media` | 保存媒体目录并触发后台重扫（目录须存在） |
 | DELETE | `/admin/settings/media` | 清除后台设置，回落到配置文件 `media.roots` |
 | GET | `/admin/fs/dirs?path=` | 目录浏览器（`path` 为空列根/盘符，仅返回子目录） |
+| GET | `/admin/thumbs/stats` | 缩略图覆盖率、ffmpeg 状态与队列统计 |
+| POST | `/admin/thumbs/rebuild` | 重新生成全部缩略图（后台顺序执行） |
 | GET | `/admin/settings/logging` | 读取日志配置 |
 | PUT | `/admin/settings/logging` | 更新保留天数、最大条数、级别、上报开关 |
 | PUT | `/admin/settings/registration` | 开关普通用户注册 |
@@ -230,7 +248,7 @@ cd web && npx vue-tsc --noEmit
 
 - 密码 bcrypt 哈希；JWT 密钥默认自动生成并写入 `data/jwt.secret`（首次启动创建，权限 600）
 - 管理员账号由启动配置初始化，不存在「谁先注册谁是管理员」
-- 媒体接口需鉴权；客户端只提交 `video_key`，实际路径来自扫描快照，避免路径穿越
+- 媒体接口为可选鉴权：无令牌按游客处理，游客只能看 `guest_enabled` 的内容；客户端只提交 `video_key`，实际路径来自扫描快照，避免路径穿越
 - 管理员接口额外校验 `role=admin`，越权与写操作均留痕
 - 局域网自签 HTTPS 即可；若要暴露公网，请走反向代理 + Let's Encrypt，不要直接开放端口
 

@@ -7,7 +7,12 @@ import "time"
 const (
 	RoleAdmin = "admin"
 	RoleUser  = "user"
+	// RoleGuest 不是数据库中的账号角色，而是未登录访问者的判定身份（CR-004）。
+	RoleGuest = "guest"
 )
+
+// RootGlobal 文件夹策略的「全局默认」根索引：对所有媒体根生效。
+const RootGlobal = -1
 
 // 媒体类型常量。
 const (
@@ -28,6 +33,7 @@ const (
 	ReasonOutOfWindow     = "out_of_time_window"
 	ReasonFileMissing     = "file_missing"
 	ReasonNotFavorited    = "not_favorited"
+	ReasonLoginRequired   = "login_required"
 )
 
 // User 用户账号。
@@ -52,11 +58,13 @@ type Favorite struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// FolderPolicy 文件夹策略。
+// FolderPolicy 文件夹策略（按根索引隔离，B-07）。
 type FolderPolicy struct {
 	ID           int64     `json:"id"`
+	RootIndex    int       `json:"root_index"`
 	FolderPath   string    `json:"folder_path"`
 	Enabled      bool      `json:"enabled"`
+	GuestEnabled bool      `json:"guest_enabled"`
 	ScheduleType string    `json:"schedule_type"`
 	TimeStart    string    `json:"time_start"`
 	TimeEnd      string    `json:"time_end"`
@@ -68,6 +76,7 @@ type FileOverride struct {
 	ID           int64     `json:"id"`
 	VideoKey     string    `json:"video_key"`
 	Enabled      bool      `json:"enabled"`
+	GuestEnabled bool      `json:"guest_enabled"`
 	ScheduleType string    `json:"schedule_type"`
 	TimeStart    string    `json:"time_start"`
 	TimeEnd      string    `json:"time_end"`

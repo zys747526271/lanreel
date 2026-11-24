@@ -13,11 +13,14 @@ import {
 } from 'naive-ui'
 import {
   getMediaSettings,
+  getThumbStats,
   listDirs,
+  rebuildThumbs,
   resetMediaRoots,
   setMediaRoots,
   triggerScan,
 } from '@/api/admin'
+import type { ThumbStatsPayload } from '@/api/admin'
 import type { DirListing, MediaSettings } from '@/api/types'
 
 const message = useMessage()
@@ -36,6 +39,46 @@ const pickerLoading = ref(false)
 const listing = ref<DirListing | null>(null)
 
 let pollTimer: number | undefined
+const thumbStats = ref<ThumbStatsPayload | null>(null)
+const rebuilding = ref(false)
+let thumbTimer: number | undefined
+
+async function loadThumbs() {
+  try {
+    thumbStats.value = (await getThumbStats()).data
+  } catch {
+    thumbStats.value = null
+  }
+}
+
+async function rebuild() {
+  rebuilding.value = true
+  try {
+    const res = await rebuildThumbs()
+    message.success(`已开始重新生成 ${res.data.queued} 个缩略图`)
+    stopThumbPoll()
+    thumbTimer = window.setInterval(async () => {
+      await loadThumbs()
+      const s = thumbStats.value
+      if (!s) return
+      const done = s.video_thumbs + s.image_thumbs
+      if (done >= s.videos + s.images) {
+        stopThumbPoll()
+        rebuilding.value = false
+      }
+    }, 1500)
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '重建失败')
+    rebuilding.value = false
+  }
+}
+
+function stopThumbPoll() {
+  if (thumbTimer !== undefined) {
+    window.clearInterval(thumbTimer)
+    thumbTimer = undefined
+  }
+}
 
 const dirty = computed(() => {
   if (!settings.value) return false
@@ -188,8 +231,13 @@ function chooseCurrent() {
   pickerOpen.value = false
 }
 
-onMounted(load)
-onBeforeUnmount(stopPoll)
+onMounted(async () => {
+  await Promise.all([load(), loadThumbs()])
+})
+onBeforeUnmount(() => {
+  stopPoll()
+  stopThumbPoll()
+})
 </script>
 
 <template>
@@ -299,6 +347,29 @@ onBeforeUnmount(stopPoll)
             {{ settings?.scanning ? '扫描中…' : '立即扫描' }}
           </n-button>
         </div>
+      </n-card>
+      <n-card class="lg:col-span-3" title="缩略图" size="small">
+        <div class="flex flex-wrap items-center justify-between gap-4 text-sm">
+          <div class="grid grid-cols-2 gap-x-8 gap-y-1 text-xs text-slate-500 sm:grid-cols-4">
+            <span>视频 {{ thumbStats?.video_thumbs ?? 0 }} / {{ thumbStats?.videos ?? 0 }}</span>
+            <span>图片 {{ thumbStats?.image_thumbs ?? 0 }} / {{ thumbStats?.images ?? 0 }}</span>
+            <span>
+              ffmpeg：
+              <span :class="thumbStats?.stats.ffmpeg_available ? 'text-emerald-600' : 'text-amber-600'">
+                {{ thumbStats?.stats.ffmpeg_available ? '已检测到' : '未安装（视频缩略图跳过）' }}
+              </span>
+            </span>
+            <span>本次生成 {{ thumbStats?.stats.generated ?? 0 }} · 失败 {{ thumbStats?.stats.failed ?? 0 }}</span>
+          </div>
+          <div class="flex gap-2">
+            <n-button size="small" :loading="rebuilding" @click="rebuild">重新生成</n-button>
+            <n-button size="small" quaternary @click="loadThumbs">刷新</n-button>
+          </div>
+        </div>
+        <p class="mt-2 text-[11px] leading-relaxed text-slate-400">
+          图片缩略图由服务端直接缩放；视频缩略图需要 ffmpeg（可配置 media.ffmpeg_path，或把 ffmpeg 加入 PATH）。
+          未安装 ffmpeg 时视频仍可播放，只是收藏夹与列表使用占位图。
+        </p>
       </n-card>
     </div>
 

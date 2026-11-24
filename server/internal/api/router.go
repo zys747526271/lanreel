@@ -18,6 +18,7 @@ import (
 	"github.com/zys747526271/lanreel/server/internal/media"
 	"github.com/zys747526271/lanreel/server/internal/repository"
 	"github.com/zys747526271/lanreel/server/internal/service"
+	"github.com/zys747526271/lanreel/server/internal/thumb"
 	"github.com/zys747526271/lanreel/server/internal/webui"
 )
 
@@ -32,6 +33,7 @@ type Handlers struct {
 	store     *repository.Store
 	log       *logging.Logger
 	logStore  *logging.SQLiteStore
+	thumbs    *thumb.Generator
 	version   string
 	startedAt time.Time
 }
@@ -39,11 +41,12 @@ type Handlers struct {
 // NewHandlers 构造 API 层。
 func NewHandlers(cfg *config.Config, authSvc *service.AuthService, mediaSvc *service.MediaService,
 	fav *service.FavoriteService, adminSvc *service.AdminService, scanner *media.Scanner,
-	store *repository.Store, logger *logging.Logger, logStore *logging.SQLiteStore, version string) *Handlers {
+	store *repository.Store, logger *logging.Logger, logStore *logging.SQLiteStore,
+	thumbs *thumb.Generator, version string) *Handlers {
 	return &Handlers{
 		cfg: cfg, auth: authSvc, media: mediaSvc, fav: fav, admin: adminSvc,
 		scanner: scanner, store: store, log: logger, logStore: logStore,
-		version: version, startedAt: time.Now(),
+		thumbs: thumbs, version: version, startedAt: time.Now(),
 	}
 }
 
@@ -70,15 +73,20 @@ func (h *Handlers) Engine() *gin.Engine {
 		v1.POST("/auth/login", h.handleLogin)
 		v1.POST("/auth/refresh", h.handleRefresh)
 
+		// 媒体浏览允许游客（未登录）访问，可见范围由策略的「游客可见」控制（CR-004）。
+		viewer := v1.Group("")
+		viewer.Use(h.optionalAuth())
+		{
+			viewer.GET("/media/random", h.handleRandomMedia)
+			viewer.GET("/media/:key/stream", h.handleStream)
+			viewer.GET("/media/:key/thumb", h.handleThumb)
+		}
+
 		authed := v1.Group("")
 		authed.Use(h.requireAuth())
 		{
 			authed.POST("/auth/logout", h.handleLogout)
 			authed.GET("/auth/me", h.handleMe)
-
-			authed.GET("/media/random", h.handleRandomMedia)
-			authed.GET("/media/:key/stream", h.handleStream)
-			authed.GET("/media/:key/thumb", h.handleThumb)
 
 			authed.GET("/favorites", h.handleListFavorites)
 			authed.POST("/favorites", h.handleAddFavorite)
@@ -118,6 +126,9 @@ func (h *Handlers) Engine() *gin.Engine {
 			admin.PUT("/settings/media", h.handleAdminSetMediaRoots)
 			admin.DELETE("/settings/media", h.handleAdminResetMediaRoots)
 			admin.GET("/fs/dirs", h.handleAdminFSDirs)
+
+			admin.GET("/thumbs/stats", h.handleAdminThumbStats)
+			admin.POST("/thumbs/rebuild", h.handleAdminThumbRebuild)
 
 			admin.GET("/settings/logging", h.handleGetLoggingSettings)
 			admin.PUT("/settings/logging", h.handleSetLoggingSettings)

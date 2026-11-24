@@ -5,8 +5,10 @@ import { useAuthStore } from '@/stores/auth'
 import { useFavoritesStore } from '@/stores/favorites'
 import { logger, type LogRecord } from '@/lib/logger'
 import { countAll, clearStore } from '@/lib/db'
-import { fetchPublicConfig } from '@/api/client'
+import { fetchPublicConfig, withToken } from '@/api/client'
 import { formatTime } from '@/lib/format'
+import { RATE_OPTIONS, prefs, resetPrefs, type PlaybackRate } from '@/lib/prefs'
+import { clearHistory, listHistory, removeHistory, type HistoryEntry } from '@/lib/history'
 import type { PublicConfig } from '@/api/types'
 
 const router = useRouter()
@@ -22,6 +24,7 @@ const logCount = ref(0)
 const favoriteCacheCount = ref(0)
 const config = ref<PublicConfig | null>(null)
 const hint = ref('')
+const history = ref<HistoryEntry[]>([])
 
 const categories = [
   { value: '', label: '全部分类' },
@@ -47,6 +50,8 @@ const filteredHint = computed(() => {
 })
 
 async function loadLogs() {
+  // 本地日志仅管理员可见（普通用户的日志排障入口在管理后台）
+  if (!auth.isAdmin) return
   loading.value = true
   try {
     logs.value = await logger.query({
@@ -67,6 +72,7 @@ async function loadMeta() {
   try {
     favoriteCacheCount.value = await countAll('favorites')
     config.value = await fetchPublicConfig()
+    history.value = await listHistory(30)
   } catch {
     /* 忽略 */
   }
@@ -109,6 +115,31 @@ async function clearCache() {
   hint.value = '本地缓存已清空'
 }
 
+async function clearAllHistory() {
+  if (!window.confirm('确认清空观看历史？该操作仅影响本机记录。')) return
+  await clearHistory()
+  history.value = []
+  hint.value = '观看历史已清空'
+}
+
+async function dropHistory(key: string) {
+  await removeHistory(key)
+  history.value = history.value.filter((h) => h.key !== key)
+}
+
+function openHistory(entry: HistoryEntry) {
+  router.push({ path: '/play', query: { src: 'history', key: entry.key } })
+}
+
+function setRate(value: PlaybackRate) {
+  prefs.defaultRate = value
+}
+
+function resetPreferences() {
+  resetPrefs()
+  hint.value = '播放设置已恢复默认'
+}
+
 async function signOut() {
   await auth.logout()
   favorites.reset()
@@ -134,12 +165,14 @@ onMounted(async () => {
               <path d="M15 18l-6-6 6-6" />
             </svg>
           </button>
-          <h1 class="text-lg font-semibold">设置与诊断</h1>
+          <h1 class="text-lg font-semibold">设置</h1>
         </div>
         <button class="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-black" @click="router.push('/')">
           继续浏览
         </button>
       </header>
+
+      <p v-if="hint" class="rounded-lg bg-white/[0.06] px-3 py-2 text-[11px] text-white/70">{{ hint }}</p>
 
       <!-- 账号 -->
       <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
@@ -180,6 +213,138 @@ onMounted(async () => {
         </div>
       </section>
 
+      <!-- 播放设置 -->
+      <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="text-sm font-medium text-white/80">播放设置</h2>
+          <button class="text-[11px] text-white/40 hover:text-white/70" @click="resetPreferences">恢复默认</button>
+        </div>
+
+        <div class="space-y-4 text-sm">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p>默认静音</p>
+              <p class="text-xs text-white/40">关闭时进入即尝试有声播放（浏览器可能要求先点击一次）</p>
+            </div>
+            <button
+              class="relative h-6 w-11 shrink-0 rounded-full transition"
+              :class="prefs.defaultMuted ? 'bg-white' : 'bg-white/15'"
+              @click="prefs.defaultMuted = !prefs.defaultMuted"
+            >
+              <span
+                class="absolute top-0.5 h-5 w-5 rounded-full bg-black transition"
+                :class="prefs.defaultMuted ? 'left-[1.375rem]' : 'left-0.5 bg-white/70'"
+              ></span>
+            </button>
+          </div>
+
+          <div>
+            <p class="mb-2">默认倍速</p>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="r in RATE_OPTIONS"
+                :key="r.value"
+                class="rounded-lg border px-2.5 py-1.5 text-xs transition"
+                :class="
+                  prefs.defaultRate === r.value
+                    ? 'border-white bg-white text-black'
+                    : 'border-white/15 text-white/70 hover:bg-white/10'
+                "
+                @click="setRate(r.value)"
+              >
+                {{ r.label }}
+              </button>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p>从收藏/历史播放时自动全屏</p>
+              <p class="text-xs text-white/40">需要浏览器允许全屏，桌面端与手机端均生效</p>
+            </div>
+            <button
+              class="relative h-6 w-11 shrink-0 rounded-full transition"
+              :class="prefs.autoFullscreen ? 'bg-white' : 'bg-white/15'"
+              @click="prefs.autoFullscreen = !prefs.autoFullscreen"
+            >
+              <span
+                class="absolute top-0.5 h-5 w-5 rounded-full bg-black transition"
+                :class="prefs.autoFullscreen ? 'left-[1.375rem]' : 'left-0.5 bg-white/70'"
+              ></span>
+            </button>
+          </div>
+
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p>全屏时自动横屏</p>
+              <p class="text-xs text-white/40">仅在移动端支持屏幕方向锁定时生效</p>
+            </div>
+            <button
+              class="relative h-6 w-11 shrink-0 rounded-full transition"
+              :class="prefs.autoRotate ? 'bg-white' : 'bg-white/15'"
+              @click="prefs.autoRotate = !prefs.autoRotate"
+            >
+              <span
+                class="absolute top-0.5 h-5 w-5 rounded-full bg-black transition"
+                :class="prefs.autoRotate ? 'left-[1.375rem]' : 'left-0.5 bg-white/70'"
+              ></span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 观看历史 -->
+      <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <div class="mb-3 flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-medium text-white/80">观看历史</h2>
+            <p class="mt-0.5 text-[11px] text-white/35">仅保存在本机，最多 100 条</p>
+          </div>
+          <button
+            v-if="history.length"
+            class="text-[11px] text-white/40 hover:text-red-300"
+            @click="clearAllHistory"
+          >
+            清空
+          </button>
+        </div>
+
+        <p v-if="!history.length" class="rounded-lg bg-white/[0.03] px-3 py-6 text-center text-xs text-white/35">
+          还没有观看记录
+        </p>
+        <ul v-else class="grid grid-cols-3 gap-1.5">
+          <li v-for="h in history" :key="h.key" class="group relative">
+            <button
+              class="block w-full overflow-hidden rounded-lg bg-white/5 text-left"
+              :title="h.rel_path"
+              @click="openHistory(h)"
+            >
+              <span class="block aspect-[9/14]">
+                <img
+                  :src="withToken(h.thumb_url)"
+                  class="h-full w-full object-cover"
+                  loading="lazy"
+                  alt=""
+                  @error="($event.target as HTMLImageElement).style.display = 'none'"
+                />
+              </span>
+              <span class="absolute inset-x-1 bottom-1 truncate rounded bg-black/60 px-1 py-0.5 text-[10px] text-white/80 backdrop-blur">
+                {{ h.rel_path.split('/').pop() }}
+              </span>
+            </button>
+            <button
+              class="absolute right-1 top-1 hidden rounded-full bg-black/70 p-1 text-white/80 group-hover:block"
+              title="从历史中移除"
+              @click.stop="dropHistory(h.key)"
+            >
+              <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 6l12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </li>
+        </ul>
+      </section>
+
       <!-- 运行环境 -->
       <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
         <h2 class="mb-3 text-sm font-medium text-white/80">运行环境</h2>
@@ -197,18 +362,18 @@ onMounted(async () => {
             <dd class="mt-0.5 text-white/80">{{ config?.image_display_seconds ?? '—' }} 秒</dd>
           </div>
           <div>
-            <dt class="text-white/35">日志上报</dt>
-            <dd class="mt-0.5 text-white/80">
-              {{ config?.frontend_log_upload ? '已开启（需管理员配置）' : '未开启（仅本地保存）' }}
-            </dd>
+            <dt class="text-white/35">游客访问</dt>
+            <dd class="mt-0.5 text-white/80">{{ config?.guest_access ? '已开启' : '未开启' }}</dd>
           </div>
           <div>
             <dt class="text-white/35">本地收藏缓存</dt>
             <dd class="mt-0.5 text-white/80">{{ favoriteCacheCount }} 条</dd>
           </div>
           <div>
-            <dt class="text-white/35">本地日志</dt>
-            <dd class="mt-0.5 text-white/80">{{ logCount }} 条 / 上限 5000</dd>
+            <dt class="text-white/35">日志上报</dt>
+            <dd class="mt-0.5 text-white/80">
+              {{ config?.frontend_log_upload ? '已开启（需管理员配置）' : '未开启（仅本地保存）' }}
+            </dd>
           </div>
         </dl>
         <div class="mt-3 flex flex-wrap gap-2">
@@ -221,10 +386,13 @@ onMounted(async () => {
         </div>
       </section>
 
-      <!-- 前端日志 -->
-      <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <!-- 本地运行日志：仅管理员可见 -->
+      <section v-if="auth.isAdmin" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 class="text-sm font-medium text-white/80">本地运行日志</h2>
+          <div>
+            <h2 class="text-sm font-medium text-white/80">本地运行日志</h2>
+            <p class="mt-0.5 text-[11px] text-white/35">仅管理员可见；全站日志请到后台「运行日志」查看</p>
+          </div>
           <div class="flex flex-wrap gap-1.5 text-xs">
             <button class="rounded-lg border border-white/15 px-2.5 py-1.5 hover:bg-white/10" @click="loadLogs">
               刷新
@@ -269,9 +437,8 @@ onMounted(async () => {
         </div>
 
         <p class="mb-2 text-[11px] text-white/40">{{ loading ? '加载中…' : filteredHint }}</p>
-        <p v-if="hint" class="mb-2 rounded-lg bg-white/[0.06] px-3 py-2 text-[11px] text-white/70">{{ hint }}</p>
 
-        <ul class="max-h-[380px] space-y-1.5 overflow-y-auto pr-1">
+        <ul class="max-h-[320px] space-y-1.5 overflow-y-auto pr-1">
           <li
             v-for="(log, idx) in logs"
             :key="log.id ?? idx"
@@ -290,11 +457,38 @@ onMounted(async () => {
             </p>
           </li>
         </ul>
+        <p class="mt-2 text-[11px] text-white/25">日志仅保存在本机浏览器，导出前已对密码、Token 等敏感字段脱敏</p>
       </section>
 
-      <p class="pb-4 text-center text-[11px] text-white/25">
-        日志仅保存在本机浏览器（IndexedDB），导出前已对密码、Token 等敏感字段脱敏
-      </p>
+      <!-- 关于 -->
+      <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <h2 class="mb-3 text-sm font-medium text-white/80">关于 LanReel</h2>
+        <p class="text-xs leading-relaxed text-white/55">
+          LanReel 是一个局域网随机视频流系统：把主机上的视频与图片文件夹变成抖音式竖屏信息流，
+          支持收藏同步、游客浏览、按文件夹/文件设置可见范围与播放时段，并提供运行日志与审计后台。
+          单二进制部署，浏览器直接访问，不做转码、不占资源。
+        </p>
+        <ul class="mt-3 space-y-1 text-[11px] text-white/40">
+          <li>· 全屏竖滑播放，视频自动播放、图片定时切换</li>
+          <li>· 收藏跨设备同步，收藏夹以缩略图网格浏览</li>
+          <li>· 游客可直接浏览，管理员按游客/普通用户分别设置可见范围</li>
+          <li>· 服务端缩略图、文件监听、登录限流、分类日志</li>
+        </ul>
+        <div class="mt-3 flex flex-wrap items-center gap-3 text-[11px]">
+          <span class="text-white/35">版本 v{{ config?.version ?? '—' }}</span>
+          <a
+            href="https://github.com/zys747526271/lanreel"
+            target="_blank"
+            rel="noreferrer"
+            class="text-sky-300/80 hover:text-sky-200"
+          >
+            GitHub 仓库
+          </a>
+          <span class="text-white/25">GPL-3.0</span>
+        </div>
+      </section>
+
+      <p class="pb-2 text-center text-[11px] text-white/20">LanReel · 局域网私有媒体浏览</p>
     </div>
   </div>
 </template>

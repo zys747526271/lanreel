@@ -27,6 +27,19 @@ var (
 	ErrSetupCompleted     = errors.New("实例已完成初始化，无法重复创建初始管理员")
 )
 
+// TooManyAttemptsError 登录尝试过于频繁（B-05）。
+type TooManyAttemptsError struct {
+	RetryAfter time.Duration
+}
+
+func (e *TooManyAttemptsError) Error() string {
+	sec := int(e.RetryAfter.Seconds())
+	if sec < 1 {
+		sec = 1
+	}
+	return fmt.Sprintf("尝试次数过多，请 %d 秒后再试", sec)
+}
+
 // SettingRegistrationOpen 注册开关设置键。
 const SettingRegistrationOpen = "registration_open"
 
@@ -35,18 +48,25 @@ const SettingSetupCompleted = "setup_completed"
 
 // AuthService 认证与账号业务。
 type AuthService struct {
-	store  *repository.Store
-	tokens *auth.Manager
-	log    *logging.Logger
-	cfg    *config.Config
+	store   *repository.Store
+	tokens  *auth.Manager
+	log     *logging.Logger
+	cfg     *config.Config
+	limiter *auth.LoginLimiter
 	// setupMu 串行化首次初始化，避免并发请求创建出多个管理员。
 	setupMu sync.Mutex
 }
 
 // NewAuthService 构造认证服务。
 func NewAuthService(store *repository.Store, tokens *auth.Manager, logger *logging.Logger, cfg *config.Config) *AuthService {
-	return &AuthService{store: store, tokens: tokens, log: logger, cfg: cfg}
+	return &AuthService{
+		store: store, tokens: tokens, log: logger, cfg: cfg,
+		limiter: auth.NewLoginLimiter(cfg.Auth.LoginMaxAttempts, cfg.Auth.LoginWindowMinutes, cfg.Auth.LoginLockMinutes),
+	}
 }
+
+// Limiter 暴露限流器（供后台清理协程使用）。
+func (s *AuthService) Limiter() *auth.LoginLimiter { return s.limiter }
 
 // RegistrationOpen 读取注册开关（数据库设置优先于配置文件）。
 func (s *AuthService) RegistrationOpen(ctx context.Context) bool {
@@ -98,22 +118,31 @@ func (s *AuthService) Register(ctx context.Context, username, password string) (
 	return u, pair, nil
 }
 
-// Login 用户登录。
+// Login 用户登录（含失败限流，B-05）。
 func (s *AuthService) Login(ctx context.Context, username, password string) (*models.User, *auth.TokenPair, error) {
 	username = strings.TrimSpace(username)
+	ip := reqctx.ClientIP(ctx)
+	if ok, retry := s.limiter.Allow(ip, username); !ok {
+		s.log.Warn(logging.CatAuth, "api.auth", "登录被限流", withCtx(ctx, map[string]any{
+			"username": username, "retry_after_sec": int(retry.Seconds()),
+		}))
+		return nil, nil, &TooManyAttemptsError{RetryAfter: retry}
+	}
+
 	u, err := s.store.GetUserByUsername(ctx, username)
 	if err != nil {
-		s.log.Warn(logging.CatAuth, "api.auth", "登录失败：用户不存在", withCtx(ctx, map[string]any{"username": username}))
+		s.noteFailure(ctx, ip, username, "用户不存在")
 		return nil, nil, ErrInvalidCredentials
 	}
 	if !auth.VerifyPassword(u.PasswordHash, password) {
-		s.log.Warn(logging.CatAuth, "api.auth", "登录失败：密码错误", withCtx(ctx, map[string]any{"username": username}))
+		s.noteFailure(ctx, ip, username, "密码错误")
 		return nil, nil, ErrInvalidCredentials
 	}
 	if !u.Enabled {
 		s.log.Warn(logging.CatAuth, "api.auth", "登录失败：账号被禁用", withCtx(ctx, map[string]any{"username": username, "user_id": u.ID}))
 		return nil, nil, ErrUserDisabled
 	}
+	s.limiter.Reset(ip, username)
 	pair, err := s.tokens.Issue(u)
 	if err != nil {
 		return nil, nil, err
@@ -337,6 +366,18 @@ func (s *AuthService) resetFirstAdminPassword(ctx context.Context, password stri
 		"username": u.Username, "user_id": u.ID,
 	})
 	return nil
+}
+
+// noteFailure 记录一次登录失败，触发锁定时写告警日志（B-05）。
+func (s *AuthService) noteFailure(ctx context.Context, ip, username, reason string) {
+	if locked := s.limiter.Fail(ip, username); locked {
+		s.log.Warn(logging.CatAuth, "api.auth", "登录失败次数过多，已临时锁定", withCtx(ctx, map[string]any{
+			"username": username, "reason": reason,
+			"lock_minutes": s.cfg.Auth.LoginLockMinutes,
+		}))
+		return
+	}
+	s.log.Warn(logging.CatAuth, "api.auth", "登录失败："+reason, withCtx(ctx, map[string]any{"username": username}))
 }
 
 func validateCredentials(username, password string) error {

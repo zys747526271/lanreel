@@ -60,13 +60,14 @@ func TestEvaluatePrecedence(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, loc)
 
 	rootDisabled := models.FolderPolicy{
+		RootIndex:  models.RootGlobal,
 		FolderPath: "", Enabled: false, ScheduleType: models.ScheduleDisabled,
 	}
 	subAlways := models.FolderPolicy{
-		FolderPath: "sub", Enabled: true, ScheduleType: models.ScheduleAlways,
+		RootIndex: 0, FolderPath: "sub", Enabled: true, ScheduleType: models.ScheduleAlways,
 	}
 	deepWindow := models.FolderPolicy{
-		FolderPath: "sub/deep", Enabled: true, ScheduleType: models.ScheduleTimeWindow,
+		RootIndex: 0, FolderPath: "sub/deep", Enabled: true, ScheduleType: models.ScheduleTimeWindow,
 		TimeStart: "18:00", TimeEnd: "23:00",
 	}
 	src := &fakeSource{
@@ -86,31 +87,31 @@ func TestEvaluatePrecedence(t *testing.T) {
 		return &media.Item{Key: key, RelPath: rel, Type: models.MediaVideo}
 	}
 
-	// 根目录策略作为全局默认，覆盖未单独配置的目录
-	if d := e.Evaluate(context.Background(), item("k1", "other/a.mp4"), false, now); d.Playable {
+	// 全局默认策略覆盖未单独配置的目录
+	if d := e.Evaluate(context.Background(), item("k1", "other/a.mp4"), Viewer{}, now); d.Playable {
 		t.Errorf("根目录禁用应影响未配置的子目录，实际 %+v", d)
 	}
 	// 子目录策略覆盖根目录
-	if d := e.Evaluate(context.Background(), item("k2", "sub/a.mp4"), false, now); !d.Playable {
+	if d := e.Evaluate(context.Background(), item("k2", "sub/a.mp4"), Viewer{}, now); !d.Playable {
 		t.Errorf("子目录 always 策略应覆盖根目录禁用，实际 %+v", d)
 	}
 	// 最长前缀优先：sub/deep 的时间窗口优先于 sub
-	if d := e.Evaluate(context.Background(), item("k3", "sub/deep/a.mp4"), false, now); d.Playable || d.Reason != models.ReasonOutOfWindow {
+	if d := e.Evaluate(context.Background(), item("k3", "sub/deep/a.mp4"), Viewer{}, now); d.Playable || d.Reason != models.ReasonOutOfWindow {
 		t.Errorf("应命中 sub/deep 时间窗口并被拦截，实际 %+v", d)
 	}
 	// 文件级覆盖 > 文件夹策略
-	if d := e.Evaluate(context.Background(), item("file-ok-key", "other/a.mp4"), false, now); !d.Playable {
+	if d := e.Evaluate(context.Background(), item("file-ok-key", "other/a.mp4"), Viewer{}, now); !d.Playable {
 		t.Errorf("文件级启用应覆盖文件夹禁用，实际 %+v", d)
 	}
-	if d := e.Evaluate(context.Background(), item("file-disabled-key", "sub/a.mp4"), false, now); d.Playable || d.Reason != models.ReasonDisabledByAdmin {
+	if d := e.Evaluate(context.Background(), item("file-disabled-key", "sub/a.mp4"), Viewer{}, now); d.Playable || d.Reason != models.ReasonDisabledByAdmin {
 		t.Errorf("文件级禁用应优先，实际 %+v", d)
 	}
 	// 管理员不受策略限制
-	if d := e.Evaluate(context.Background(), item("k1", "other/a.mp4"), true, now); !d.Playable {
+	if d := e.Evaluate(context.Background(), item("k1", "other/a.mp4"), Viewer{IsAdmin: true}, now); !d.Playable {
 		t.Errorf("管理员应始终可播放，实际 %+v", d)
 	}
 	// 缺少媒体条目
-	if d := e.Evaluate(context.Background(), nil, false, now); d.Playable || d.Reason != models.ReasonFileMissing {
+	if d := e.Evaluate(context.Background(), nil, Viewer{}, now); d.Playable || d.Reason != models.ReasonFileMissing {
 		t.Errorf("空条目应返回 file_missing，实际 %+v", d)
 	}
 }
@@ -122,14 +123,78 @@ func TestEvaluateCacheInvalidation(t *testing.T) {
 	e := NewEvaluator(src, loc, nil)
 	it := &media.Item{Key: "k", RelPath: "a.mp4"}
 
-	if d := e.Evaluate(context.Background(), it, false, now); !d.Playable {
+	if d := e.Evaluate(context.Background(), it, Viewer{}, now); !d.Playable {
 		t.Fatalf("默认应允许，实际 %+v", d)
 	}
 
 	// 策略变更：写入后 Invalidate 应立即生效
-	src.folders = []models.FolderPolicy{{FolderPath: "", Enabled: false, ScheduleType: models.ScheduleDisabled}}
+	src.folders = []models.FolderPolicy{{
+		RootIndex: 0, FolderPath: "", Enabled: false, ScheduleType: models.ScheduleDisabled,
+	}}
 	e.Invalidate()
-	if d := e.Evaluate(context.Background(), it, false, now); d.Playable {
+	if d := e.Evaluate(context.Background(), it, Viewer{}, now); d.Playable {
 		t.Fatalf("失效缓存后应读取到新策略，实际 %+v", d)
+	}
+}
+
+// TestEvaluateAudience 游客与普通用户分别按各自开关判定（CR-004）。
+func TestEvaluateAudience(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, loc)
+	src := &fakeSource{
+		folders: []models.FolderPolicy{{
+			RootIndex: 0, FolderPath: "adult", Enabled: true, GuestEnabled: false,
+			ScheduleType: models.ScheduleAlways,
+		}},
+	}
+	e := NewEvaluator(src, loc, nil)
+	it := &media.Item{Key: "k", RootIndex: 0, RelPath: "adult/a.mp4"}
+
+	if d := e.Evaluate(context.Background(), it, Viewer{}, now); !d.Playable {
+		t.Fatalf("普通用户应可播放，实际 %+v", d)
+	}
+	if d := e.Evaluate(context.Background(), it, Viewer{IsGuest: true}, now); d.Playable || d.Reason != models.ReasonDisabledByAdmin {
+		t.Fatalf("游客应被拦截，实际 %+v", d)
+	}
+}
+
+// TestEvaluateMultiRootIsolation 多根同名目录互不影响（B-07）。
+func TestEvaluateMultiRootIsolation(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, loc)
+	src := &fakeSource{
+		folders: []models.FolderPolicy{{
+			RootIndex: 0, FolderPath: "sub", Enabled: false, GuestEnabled: false,
+			ScheduleType: models.ScheduleAlways,
+		}},
+	}
+	e := NewEvaluator(src, loc, nil)
+
+	root0 := &media.Item{Key: "k0", RootIndex: 0, RelPath: "sub/a.mp4"}
+	root1 := &media.Item{Key: "k1", RootIndex: 1, RelPath: "sub/a.mp4"}
+	if d := e.Evaluate(context.Background(), root0, Viewer{}, now); d.Playable {
+		t.Fatalf("root0 的 sub 被禁用，实际 %+v", d)
+	}
+	if d := e.Evaluate(context.Background(), root1, Viewer{}, now); !d.Playable {
+		t.Fatalf("root1 的同名 sub 不应受影响，实际 %+v", d)
+	}
+}
+
+// TestEvaluateGlobalFallback 全局默认策略在任意根生效。
+func TestEvaluateGlobalFallback(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, loc)
+	src := &fakeSource{
+		folders: []models.FolderPolicy{{
+			RootIndex: models.RootGlobal, FolderPath: "", Enabled: false, GuestEnabled: false,
+			ScheduleType: models.ScheduleDisabled,
+		}},
+	}
+	e := NewEvaluator(src, loc, nil)
+	for _, root := range []int{0, 1} {
+		it := &media.Item{Key: "k", RootIndex: root, RelPath: "x/a.mp4"}
+		if d := e.Evaluate(context.Background(), it, Viewer{}, now); d.Playable {
+			t.Fatalf("root %d 应被全局策略拦截，实际 %+v", root, d)
+		}
 	}
 }

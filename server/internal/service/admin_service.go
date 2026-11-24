@@ -304,87 +304,141 @@ func (s *AdminService) CleanUserFavorites(ctx context.Context, admin *models.Use
 	return n, nil
 }
 
-// FolderPolicyView 文件夹策略视图（含扫描统计）。
+// FolderPolicyView 文件夹策略视图（按根索引隔离，B-07 / CR-004）。
 type FolderPolicyView struct {
+	RootIndex     int        `json:"root_index"`
+	RootName      string     `json:"root_name"`
 	FolderPath    string     `json:"folder_path"`
 	Total         int        `json:"total"`
 	Videos        int        `json:"videos"`
 	Images        int        `json:"images"`
 	Enabled       bool       `json:"enabled"`
+	GuestEnabled  bool       `json:"guest_enabled"`
 	ScheduleType  string     `json:"schedule_type"`
 	TimeStart     string     `json:"time_start"`
 	TimeEnd       string     `json:"time_end"`
 	Configured    bool       `json:"configured"`
 	Inherited     bool       `json:"inherited"`
 	InheritedFrom string     `json:"inherited_from"`
+	InheritedRoot int        `json:"inherited_root"`
 	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
 }
 
-// ListFolders 列出扫描到的文件夹及现有策略。
+// ListFolders 列出各媒体根下的文件夹及其生效策略。
 func (s *AdminService) ListFolders(ctx context.Context) ([]FolderPolicyView, error) {
 	pols, err := s.store.ListFolderPolicies(ctx)
 	if err != nil {
 		return nil, err
 	}
-	pmap := map[string]models.FolderPolicy{}
+	type fkey struct {
+		root int
+		path string
+	}
+	pmap := map[fkey]models.FolderPolicy{}
 	for _, p := range pols {
-		pmap[media.NormalizeFolderPath(p.FolderPath)] = p
+		pmap[fkey{p.RootIndex, media.NormalizeFolderPath(p.FolderPath)}] = p
+	}
+
+	roots := s.media.Roots()
+	rootName := map[int]string{models.RootGlobal: "全局默认"}
+	for _, r := range roots {
+		rootName[r.RootIndex] = r.RootName
 	}
 	stats := s.media.Folders()
-	out := make([]FolderPolicyView, 0, len(stats)+len(pols))
-	seen := map[string]bool{}
-	for _, st := range stats {
-		v := FolderPolicyView{
-			FolderPath: st.FolderPath, Total: st.Total, Videos: st.Videos, Images: st.Images,
-			Enabled: true, ScheduleType: models.ScheduleAlways,
+
+	out := make([]FolderPolicyView, 0, len(stats)+len(pols)+len(roots))
+	seen := map[fkey]bool{}
+
+	add := func(root int, path string, totals [3]int) {
+		key := fkey{root, media.NormalizeFolderPath(path)}
+		if seen[key] {
+			return
 		}
-		if p, ok := pmap[st.FolderPath]; ok {
+		seen[key] = true
+		name := rootName[root]
+		if name == "" {
+			name = fmt.Sprintf("根 %d", root)
+		}
+		v := FolderPolicyView{
+			RootIndex: root, RootName: name, FolderPath: key.path,
+			Total: totals[0], Videos: totals[1], Images: totals[2],
+			Enabled: true, GuestEnabled: true, ScheduleType: models.ScheduleAlways,
+		}
+		if p, ok := pmap[key]; ok {
 			v.Enabled = p.Enabled
+			v.GuestEnabled = p.GuestEnabled
 			v.ScheduleType = p.ScheduleType
 			v.TimeStart = p.TimeStart
 			v.TimeEnd = p.TimeEnd
 			v.Configured = true
 			t := p.UpdatedAt
 			v.UpdatedAt = &t
-		} else if p, ok := s.eval.MatchFolder(ctx, st.FolderPath); ok {
-			// 未单独配置但被上级目录策略覆盖时，展示生效状态，避免后台误读。
+		} else if p, ok := s.eval.MatchFolder(ctx, root, key.path); ok {
+			// 未单独配置但被上级目录或全局默认策略覆盖，展示生效值，避免误读。
 			v.Enabled = p.Enabled
+			v.GuestEnabled = p.GuestEnabled
 			v.ScheduleType = p.ScheduleType
 			v.TimeStart = p.TimeStart
 			v.TimeEnd = p.TimeEnd
 			v.Inherited = true
 			v.InheritedFrom = media.NormalizeFolderPath(p.FolderPath)
+			v.InheritedRoot = p.RootIndex
 		}
-		seen[st.FolderPath] = true
 		out = append(out, v)
 	}
-	// 已配置但当前无文件的文件夹（例如临时删除后仍保留策略）也要可见。
-	for _, p := range pols {
-		path := media.NormalizeFolderPath(p.FolderPath)
-		if seen[path] {
+
+	// 每个根一行「整个根目录」，统计包含所有子目录。
+	rootTotals := map[int][3]int{}
+	for _, st := range stats {
+		t := rootTotals[st.RootIndex]
+		t[0] += st.Total
+		t[1] += st.Videos
+		t[2] += st.Images
+		rootTotals[st.RootIndex] = t
+	}
+	for _, r := range roots {
+		add(r.RootIndex, "", rootTotals[r.RootIndex])
+	}
+	for _, st := range stats {
+		if st.FolderPath == "" {
 			continue
 		}
-		t := p.UpdatedAt
-		out = append(out, FolderPolicyView{
-			FolderPath: path, Enabled: p.Enabled, ScheduleType: p.ScheduleType,
-			TimeStart: p.TimeStart, TimeEnd: p.TimeEnd, Configured: true, UpdatedAt: &t,
-		})
+		add(st.RootIndex, st.FolderPath, [3]int{st.Total, st.Videos, st.Images})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FolderPath < out[j].FolderPath })
+	// 已配置但当前无文件的目录（含全局默认策略）也要可见。
+	for _, p := range pols {
+		add(p.RootIndex, p.FolderPath, [3]int{})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RootIndex != out[j].RootIndex {
+			return out[i].RootIndex < out[j].RootIndex
+		}
+		return out[i].FolderPath < out[j].FolderPath
+	})
 	return out, nil
 }
 
 // FolderPolicyInput 文件夹策略输入。
 type FolderPolicyInput struct {
+	RootIndex    int    `json:"root_index"`
 	FolderPath   string `json:"folder_path"`
 	Enabled      bool   `json:"enabled"`
+	GuestEnabled bool   `json:"guest_enabled"`
 	ScheduleType string `json:"schedule_type"`
 	TimeStart    string `json:"time_start"`
 	TimeEnd      string `json:"time_end"`
 }
 
-// SetFolderPolicy 设置文件夹策略（F-12 / F-14）。
+// SetFolderPolicy 设置文件夹策略（F-12 / F-14，按根索引隔离）。
 func (s *AdminService) SetFolderPolicy(ctx context.Context, admin *models.User, in FolderPolicyInput) (*models.FolderPolicy, error) {
+	if in.RootIndex < models.RootGlobal {
+		return nil, fmt.Errorf("%w: 根索引非法", ErrValidation)
+	}
+	roots := s.media.Roots()
+	if in.RootIndex >= 0 && in.RootIndex >= len(roots) {
+		return nil, fmt.Errorf("%w: 媒体根不存在（索引 %d）", ErrValidation, in.RootIndex)
+	}
 	in.FolderPath = repository.NormalizeFolder(in.FolderPath)
 	switch in.ScheduleType {
 	case "", models.ScheduleAlways:
@@ -401,49 +455,56 @@ func (s *AdminService) SetFolderPolicy(ctx context.Context, admin *models.User, 
 	var before any
 	if pols, err := s.store.ListFolderPolicies(ctx); err == nil {
 		for _, p := range pols {
-			if media.NormalizeFolderPath(p.FolderPath) == in.FolderPath {
+			if p.RootIndex == in.RootIndex && media.NormalizeFolderPath(p.FolderPath) == in.FolderPath {
 				before = p
 				break
 			}
 		}
 	}
 	p, err := s.store.UpsertFolderPolicy(ctx, models.FolderPolicy{
-		FolderPath: in.FolderPath, Enabled: in.Enabled, ScheduleType: in.ScheduleType,
+		RootIndex: in.RootIndex, FolderPath: in.FolderPath, Enabled: in.Enabled,
+		GuestEnabled: in.GuestEnabled, ScheduleType: in.ScheduleType,
 		TimeStart: in.TimeStart, TimeEnd: in.TimeEnd,
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.eval.Invalidate()
-	s.audit(ctx, admin, models.AuditTargetFolder, in.FolderPath, "设置文件夹策略", before, p)
+	s.audit(ctx, admin, models.AuditTargetFolder,
+		fmt.Sprintf("%d:%s", in.RootIndex, in.FolderPath), "设置文件夹策略", before, p)
 	return p, nil
 }
 
-// DeleteFolderPolicy 删除文件夹策略。
-func (s *AdminService) DeleteFolderPolicy(ctx context.Context, admin *models.User, folderPath string) error {
+// DeleteFolderPolicy 删除文件夹策略（恢复上级或默认规则）。
+func (s *AdminService) DeleteFolderPolicy(ctx context.Context, admin *models.User, rootIndex int, folderPath string) error {
 	folderPath = repository.NormalizeFolder(folderPath)
-	removed, err := s.store.DeleteFolderPolicy(ctx, folderPath)
+	removed, err := s.store.DeleteFolderPolicy(ctx, rootIndex, folderPath)
 	if err != nil {
 		return err
 	}
 	if removed {
 		s.eval.Invalidate()
-		s.audit(ctx, admin, models.AuditTargetFolder, folderPath, "删除文件夹策略", nil, nil)
+		s.audit(ctx, admin, models.AuditTargetFolder,
+			fmt.Sprintf("%d:%s", rootIndex, folderPath), "删除文件夹策略", nil, nil)
 	}
 	return nil
 }
 
 // FileView 文件策略视图。
 type FileView struct {
-	Key       string               `json:"key"`
-	RelPath   string               `json:"rel_path"`
-	MediaType string               `json:"media_type"`
-	Folder    string               `json:"folder"`
-	Duration  float64              `json:"duration"`
-	Size      int64                `json:"size"`
-	Playable  bool                 `json:"playable"`
-	Reason    string               `json:"reason,omitempty"`
-	Override  *models.FileOverride `json:"override,omitempty"`
+	Key           string               `json:"key"`
+	RootIndex     int                  `json:"root_index"`
+	RootName      string               `json:"root_name"`
+	RelPath       string               `json:"rel_path"`
+	MediaType     string               `json:"media_type"`
+	Folder        string               `json:"folder"`
+	Duration      float64              `json:"duration"`
+	Size          int64                `json:"size"`
+	Playable      bool                 `json:"playable"`
+	Reason        string               `json:"reason,omitempty"`
+	GuestPlayable bool                 `json:"guest_playable"`
+	GuestReason   string               `json:"guest_reason,omitempty"`
+	Override      *models.FileOverride `json:"override,omitempty"`
 }
 
 // ListFiles 文件列表（支持关键字与文件夹过滤）。
@@ -481,17 +542,22 @@ func (s *AdminService) ListFiles(ctx context.Context, admin *models.User, keywor
 	}
 	out := make([]FileView, 0, end-start)
 	for _, it := range items[start:end] {
-		// 以普通用户视角判定，便于管理员核对最终可见性。
-		d := s.eval.Evaluate(ctx, it, false, time.Now())
+		// 分别以普通用户与游客视角判定，便于管理员核对两个受众的最终可见性。
+		d := s.eval.Evaluate(ctx, it, policy.Viewer{}, time.Now())
+		dg := s.eval.Evaluate(ctx, it, policy.Viewer{IsGuest: true}, time.Now())
 		v := FileView{
-			Key: it.Key, RelPath: it.RelPath, MediaType: it.Type, Folder: it.Folder(),
-			Duration: it.Duration, Size: it.Size, Playable: d.Playable, Reason: d.Reason,
+			Key: it.Key, RootIndex: it.RootIndex, RootName: it.RootName,
+			RelPath: it.RelPath, MediaType: it.Type, Folder: it.Folder(),
+			Duration: it.Duration, Size: it.Size,
+			Playable: d.Playable, Reason: d.Reason,
+			GuestPlayable: dg.Playable, GuestReason: dg.Reason,
 		}
 		if ov, ok := overrides[it.Key]; ok {
 			o := ov
 			v.Override = &o
 			// 后台以「策略本身是否放行」呈现，不受管理员绕过影响。
-			v.Playable, v.Reason = evaluateOverride(&o, s.cfg.Location)
+			v.Playable, v.Reason = evaluateOverride(&o, s.cfg.Location, false)
+			v.GuestPlayable, v.GuestReason = evaluateOverride(&o, s.cfg.Location, true)
 		}
 		out = append(out, v)
 	}
@@ -508,14 +574,19 @@ func (s *AdminService) GetFile(ctx context.Context, key string) (*FileView, erro
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return nil, err
 	}
-	d := s.eval.Evaluate(ctx, it, false, time.Now())
+	d := s.eval.Evaluate(ctx, it, policy.Viewer{}, time.Now())
+	dg := s.eval.Evaluate(ctx, it, policy.Viewer{IsGuest: true}, time.Now())
 	v := &FileView{
-		Key: it.Key, RelPath: it.RelPath, MediaType: it.Type, Folder: it.Folder(),
-		Duration: it.Duration, Size: it.Size, Playable: d.Playable, Reason: d.Reason,
+		Key: it.Key, RootIndex: it.RootIndex, RootName: it.RootName,
+		RelPath: it.RelPath, MediaType: it.Type, Folder: it.Folder(),
+		Duration: it.Duration, Size: it.Size,
+		Playable: d.Playable, Reason: d.Reason,
+		GuestPlayable: dg.Playable, GuestReason: dg.Reason,
 	}
 	if ov != nil {
 		v.Override = ov
-		v.Playable, v.Reason = evaluateOverride(ov, s.cfg.Location)
+		v.Playable, v.Reason = evaluateOverride(ov, s.cfg.Location, false)
+		v.GuestPlayable, v.GuestReason = evaluateOverride(ov, s.cfg.Location, true)
 	}
 	return v, nil
 }
@@ -523,6 +594,7 @@ func (s *AdminService) GetFile(ctx context.Context, key string) (*FileView, erro
 // FileOverrideInput 文件级策略输入。
 type FileOverrideInput struct {
 	Enabled      bool   `json:"enabled"`
+	GuestEnabled bool   `json:"guest_enabled"`
 	ScheduleType string `json:"schedule_type"`
 	TimeStart    string `json:"time_start"`
 	TimeEnd      string `json:"time_end"`
@@ -552,8 +624,9 @@ func (s *AdminService) SetFileOverride(ctx context.Context, admin *models.User, 
 		before = b
 	}
 	o, err := s.store.UpsertFileOverride(ctx, models.FileOverride{
-		VideoKey: key, Enabled: in.Enabled, ScheduleType: in.ScheduleType,
-		TimeStart: in.TimeStart, TimeEnd: in.TimeEnd, Note: in.Note,
+		VideoKey: key, Enabled: in.Enabled, GuestEnabled: in.GuestEnabled,
+		ScheduleType: in.ScheduleType,
+		TimeStart:    in.TimeStart, TimeEnd: in.TimeEnd, Note: in.Note,
 	})
 	if err != nil {
 		return nil, err
@@ -633,8 +706,12 @@ func (s *AdminService) PurgeLogs(ctx context.Context, admin *models.User) (int, 
 	return n, nil
 }
 
-func evaluateOverride(o *models.FileOverride, loc *time.Location) (bool, string) {
-	if !o.Enabled || o.ScheduleType == models.ScheduleDisabled {
+func evaluateOverride(o *models.FileOverride, loc *time.Location, guest bool) (bool, string) {
+	visible := o.Enabled
+	if guest {
+		visible = o.GuestEnabled
+	}
+	if !visible || o.ScheduleType == models.ScheduleDisabled {
 		return false, models.ReasonDisabledByAdmin
 	}
 	if o.ScheduleType == models.ScheduleTimeWindow && !policy.InWindow(time.Now().In(loc), o.TimeStart, o.TimeEnd, loc) {

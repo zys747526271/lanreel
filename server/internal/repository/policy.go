@@ -14,7 +14,8 @@ import (
 // ListFolderPolicies 返回全部文件夹策略。
 func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, folder_path, enabled, schedule_type, time_start, time_end, updated_at FROM folder_policies ORDER BY folder_path`)
+		`SELECT id, root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end, updated_at
+		 FROM folder_policies ORDER BY root_index, folder_path`)
 	if err != nil {
 		return nil, err
 	}
@@ -22,12 +23,14 @@ func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, 
 	out := make([]models.FolderPolicy, 0, 16)
 	for rows.Next() {
 		var p models.FolderPolicy
-		var enabled int
+		var enabled, guestEnabled int
 		var updated string
-		if err := rows.Scan(&p.ID, &p.FolderPath, &enabled, &p.ScheduleType, &p.TimeStart, &p.TimeEnd, &updated); err != nil {
+		if err := rows.Scan(&p.ID, &p.RootIndex, &p.FolderPath, &enabled, &guestEnabled,
+			&p.ScheduleType, &p.TimeStart, &p.TimeEnd, &updated); err != nil {
 			return nil, err
 		}
 		p.Enabled = enabled == 1
+		p.GuestEnabled = guestEnabled == 1
 		p.UpdatedAt = parseTime(updated)
 		out = append(out, p)
 	}
@@ -38,33 +41,38 @@ func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, 
 func (s *Store) UpsertFolderPolicy(ctx context.Context, p models.FolderPolicy) (*models.FolderPolicy, error) {
 	now := s.now()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO folder_policies (folder_path, enabled, schedule_type, time_start, time_end, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(folder_path) DO UPDATE SET
-		   enabled = excluded.enabled, schedule_type = excluded.schedule_type,
+		`INSERT INTO folder_policies (root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(root_index, folder_path) DO UPDATE SET
+		   enabled = excluded.enabled, guest_enabled = excluded.guest_enabled,
+		   schedule_type = excluded.schedule_type,
 		   time_start = excluded.time_start, time_end = excluded.time_end, updated_at = excluded.updated_at`,
-		p.FolderPath, boolToInt(p.Enabled), p.ScheduleType, p.TimeStart, p.TimeEnd, now)
+		p.RootIndex, p.FolderPath, boolToInt(p.Enabled), boolToInt(p.GuestEnabled),
+		p.ScheduleType, p.TimeStart, p.TimeEnd, now)
 	if err != nil {
 		return nil, err
 	}
 	var out models.FolderPolicy
-	var enabled int
+	var enabled, guestEnabled int
 	var updated string
 	err = s.db.QueryRowContext(ctx,
-		`SELECT id, folder_path, enabled, schedule_type, time_start, time_end, updated_at
-		 FROM folder_policies WHERE folder_path = ?`, p.FolderPath).
-		Scan(&out.ID, &out.FolderPath, &enabled, &out.ScheduleType, &out.TimeStart, &out.TimeEnd, &updated)
+		`SELECT id, root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end, updated_at
+		 FROM folder_policies WHERE root_index = ? AND folder_path = ?`, p.RootIndex, p.FolderPath).
+		Scan(&out.ID, &out.RootIndex, &out.FolderPath, &enabled, &guestEnabled,
+			&out.ScheduleType, &out.TimeStart, &out.TimeEnd, &updated)
 	if err != nil {
 		return nil, err
 	}
 	out.Enabled = enabled == 1
+	out.GuestEnabled = guestEnabled == 1
 	out.UpdatedAt = parseTime(updated)
 	return &out, nil
 }
 
-// DeleteFolderPolicy 删除文件夹策略（恢复默认允许）。
-func (s *Store) DeleteFolderPolicy(ctx context.Context, folderPath string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM folder_policies WHERE folder_path = ?`, folderPath)
+// DeleteFolderPolicy 删除文件夹策略（恢复上级/默认规则）。
+func (s *Store) DeleteFolderPolicy(ctx context.Context, rootIndex int, folderPath string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM folder_policies WHERE root_index = ? AND folder_path = ?`, rootIndex, folderPath)
 	if err != nil {
 		return false, err
 	}
@@ -79,10 +87,11 @@ func (s *Store) GetFileOverride(ctx context.Context, videoKey string) (*models.F
 	var o models.FileOverride
 	var enabled int
 	var updated string
+	var guestEnabled int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, video_key, enabled, schedule_type, time_start, time_end, note, updated_at
+		`SELECT id, video_key, enabled, guest_enabled, schedule_type, time_start, time_end, note, updated_at
 		 FROM file_overrides WHERE video_key = ?`, videoKey).
-		Scan(&o.ID, &o.VideoKey, &enabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated)
+		Scan(&o.ID, &o.VideoKey, &enabled, &guestEnabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -90,6 +99,7 @@ func (s *Store) GetFileOverride(ctx context.Context, videoKey string) (*models.F
 		return nil, err
 	}
 	o.Enabled = enabled == 1
+	o.GuestEnabled = guestEnabled == 1
 	o.UpdatedAt = parseTime(updated)
 	return &o, nil
 }
@@ -97,7 +107,7 @@ func (s *Store) GetFileOverride(ctx context.Context, videoKey string) (*models.F
 // ListFileOverrides 返回全部文件级覆盖（key → 覆盖）。
 func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOverride, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, video_key, enabled, schedule_type, time_start, time_end, note, updated_at FROM file_overrides`)
+		`SELECT id, video_key, enabled, guest_enabled, schedule_type, time_start, time_end, note, updated_at FROM file_overrides`)
 	if err != nil {
 		return nil, err
 	}
@@ -105,12 +115,14 @@ func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOv
 	out := map[string]models.FileOverride{}
 	for rows.Next() {
 		var o models.FileOverride
-		var enabled int
+		var enabled, guestEnabled int
 		var updated string
-		if err := rows.Scan(&o.ID, &o.VideoKey, &enabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated); err != nil {
+		if err := rows.Scan(&o.ID, &o.VideoKey, &enabled, &guestEnabled,
+			&o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated); err != nil {
 			return nil, err
 		}
 		o.Enabled = enabled == 1
+		o.GuestEnabled = guestEnabled == 1
 		o.UpdatedAt = parseTime(updated)
 		out[o.VideoKey] = o
 	}
@@ -121,13 +133,15 @@ func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOv
 func (s *Store) UpsertFileOverride(ctx context.Context, o models.FileOverride) (*models.FileOverride, error) {
 	now := s.now()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO file_overrides (video_key, enabled, schedule_type, time_start, time_end, note, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO file_overrides (video_key, enabled, guest_enabled, schedule_type, time_start, time_end, note, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(video_key) DO UPDATE SET
-		   enabled = excluded.enabled, schedule_type = excluded.schedule_type,
+		   enabled = excluded.enabled, guest_enabled = excluded.guest_enabled,
+		   schedule_type = excluded.schedule_type,
 		   time_start = excluded.time_start, time_end = excluded.time_end,
 		   note = excluded.note, updated_at = excluded.updated_at`,
-		o.VideoKey, boolToInt(o.Enabled), o.ScheduleType, o.TimeStart, o.TimeEnd, o.Note, now)
+		o.VideoKey, boolToInt(o.Enabled), boolToInt(o.GuestEnabled),
+		o.ScheduleType, o.TimeStart, o.TimeEnd, o.Note, now)
 	if err != nil {
 		return nil, err
 	}

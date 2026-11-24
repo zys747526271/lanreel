@@ -18,6 +18,8 @@ import (
 type MediaView struct {
 	Key       string  `json:"key"`
 	MediaType string  `json:"media_type"`
+	RootIndex int     `json:"root_index"`
+	RootName  string  `json:"root_name"`
 	RelPath   string  `json:"rel_path"`
 	Folder    string  `json:"folder"`
 	Duration  float64 `json:"duration"`
@@ -61,10 +63,12 @@ func (s *MediaService) Scanner() *media.Scanner { return s.scanner }
 
 // BuildView 组装带可见性与收藏状态的视图。
 func (s *MediaService) BuildView(ctx context.Context, u *models.User, item *media.Item, favorited map[string]bool) MediaView {
-	d := s.evaluator.Evaluate(ctx, item, u.IsAdmin(), time.Now())
+	d := s.evaluator.Evaluate(ctx, item, policy.ForUser(u), time.Now())
 	v := MediaView{
 		Key:       item.Key,
 		MediaType: item.Type,
+		RootIndex: item.RootIndex,
+		RootName:  item.RootName,
 		RelPath:   item.RelPath,
 		Folder:    item.Folder(),
 		Duration:  item.Duration,
@@ -80,7 +84,7 @@ func (s *MediaService) BuildView(ctx context.Context, u *models.User, item *medi
 
 // Decide 判定单个媒体的可见性。
 func (s *MediaService) Decide(ctx context.Context, u *models.User, item *media.Item) policy.Decision {
-	return s.evaluator.Evaluate(ctx, item, u.IsAdmin(), time.Now())
+	return s.evaluator.Evaluate(ctx, item, policy.ForUser(u), time.Now())
 }
 
 // RandomQuery 随机流查询参数。
@@ -119,7 +123,7 @@ func (s *MediaService) Random(ctx context.Context, u *models.User, q RandomQuery
 			continue
 		}
 		if !u.IsAdmin() {
-			if d := s.evaluator.Evaluate(ctx, it, false, time.Now()); !d.Playable {
+			if d := s.evaluator.Evaluate(ctx, it, policy.ForUser(u), time.Now()); !d.Playable {
 				continue
 			}
 		}
@@ -128,7 +132,7 @@ func (s *MediaService) Random(ctx context.Context, u *models.User, q RandomQuery
 	if len(candidates) == 0 && len(exclude) > 0 {
 		// 排除项过多（例如媒体很少）时忽略排除，避免返回空列表。
 		for _, it := range snap.Items {
-			if u.IsAdmin() || s.evaluator.Evaluate(ctx, it, false, time.Now()).Playable {
+			if u.IsAdmin() || s.evaluator.Evaluate(ctx, it, policy.ForUser(u), time.Now()).Playable {
 				candidates = append(candidates, it)
 			}
 		}
@@ -184,22 +188,45 @@ func (s *MediaService) randomFromFavorites(ctx context.Context, u *models.User, 
 
 // FolderStat 文件夹统计视图。
 type FolderStat struct {
+	RootIndex  int    `json:"root_index"`
+	RootName   string `json:"root_name"`
 	FolderPath string `json:"folder_path"`
 	Total      int    `json:"total"`
 	Videos     int    `json:"videos"`
 	Images     int    `json:"images"`
 }
 
-// Folders 统计当前快照中的文件夹分布，供后台配置策略。
+// RootInfo 一个媒体根的索引与名称。
+type RootInfo struct {
+	RootIndex int    `json:"root_index"`
+	RootName  string `json:"root_name"`
+	Path      string `json:"path"`
+}
+
+// Roots 返回当前生效的媒体根（索引与展示名）。
+func (s *MediaService) Roots() []RootInfo {
+	roots := s.scanner.Roots()
+	out := make([]RootInfo, 0, len(roots))
+	for i, r := range roots {
+		out = append(out, RootInfo{RootIndex: i, RootName: media.RootDisplayName(r), Path: r})
+	}
+	return out
+}
+
+// Folders 统计当前快照中的文件夹分布（按根索引 + 相对路径聚合），供后台配置策略。
 func (s *MediaService) Folders() []FolderStat {
 	snap := s.scanner.Snapshot()
-	m := map[string]*FolderStat{}
+	type key struct {
+		root int
+		path string
+	}
+	m := map[key]*FolderStat{}
 	for _, it := range snap.Items {
-		f := it.Folder()
-		st, ok := m[f]
+		k := key{root: it.RootIndex, path: it.Folder()}
+		st, ok := m[k]
 		if !ok {
-			st = &FolderStat{FolderPath: f}
-			m[f] = st
+			st = &FolderStat{RootIndex: it.RootIndex, RootName: it.RootName, FolderPath: k.path}
+			m[k] = st
 		}
 		st.Total++
 		if it.Type == models.MediaVideo {
@@ -212,7 +239,12 @@ func (s *MediaService) Folders() []FolderStat {
 	for _, st := range m {
 		out = append(out, *st)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FolderPath < out[j].FolderPath })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RootIndex != out[j].RootIndex {
+			return out[i].RootIndex < out[j].RootIndex
+		}
+		return out[i].FolderPath < out[j].FolderPath
+	})
 	return out
 }
 

@@ -43,6 +43,16 @@ func fail(c *gin.Context, status int, code, message string) {
 
 // failService 将业务错误映射为 HTTP 响应。
 func failService(c *gin.Context, err error) {
+	var lockErr *service.TooManyAttemptsError
+	if errors.As(err, &lockErr) {
+		sec := int(lockErr.RetryAfter.Seconds())
+		if sec < 1 {
+			sec = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(sec))
+		fail(c, http.StatusTooManyRequests, "too_many_attempts", lockErr.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, service.ErrInvalidCredentials):
 		fail(c, http.StatusUnauthorized, "invalid_credentials", err.Error())

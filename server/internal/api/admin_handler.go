@@ -61,10 +61,11 @@ func (h *Handlers) handleAdminSetFolder(c *gin.Context) {
 	ok(c, p)
 }
 
-// handleAdminDeleteFolder DELETE /api/v1/admin/folders?folder_path=xxx
+// handleAdminDeleteFolder DELETE /api/v1/admin/folders?root_index=0&folder_path=xxx
 func (h *Handlers) handleAdminDeleteFolder(c *gin.Context) {
 	path := c.Query("folder_path")
-	if err := h.admin.DeleteFolderPolicy(c.Request.Context(), currentUser(c), path); err != nil {
+	rootIndex := queryInt(c, "root_index", 0)
+	if err := h.admin.DeleteFolderPolicy(c.Request.Context(), currentUser(c), rootIndex, path); err != nil {
 		failService(c, err)
 		return
 	}
@@ -344,13 +345,13 @@ func (h *Handlers) handleClientLogs(c *gin.Context) {
 	}
 	var in struct {
 		Entries []struct {
-			TS          string         `json:"ts"`
-			Level       string         `json:"level"`
-			Category    string         `json:"category"`
-			Module      string         `json:"module"`
-			Message     string         `json:"message"`
-			Context     map[string]any `json:"context"`
-			RequestID   string         `json:"request_id"`
+			TS        string         `json:"ts"`
+			Level     string         `json:"level"`
+			Category  string         `json:"category"`
+			Module    string         `json:"module"`
+			Message   string         `json:"message"`
+			Context   map[string]any `json:"context"`
+			RequestID string         `json:"request_id"`
 		} `json:"entries"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {

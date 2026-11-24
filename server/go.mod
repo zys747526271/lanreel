@@ -3,6 +3,7 @@ module github.com/zys747526271/lanreel/server
 go 1.25.0
 
 require (
+	github.com/fsnotify/fsnotify v1.8.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	golang.org/x/crypto v0.48.0

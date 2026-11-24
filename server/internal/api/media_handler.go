@@ -30,6 +30,10 @@ func (h *Handlers) handleRandomMedia(c *gin.Context) {
 	}
 	q := service.RandomQuery{Limit: limit, Exclude: exclude}
 	if c.Query("mode") == "favorites" {
+		if u == nil {
+			fail(c, http.StatusUnauthorized, models.ReasonLoginRequired, "登录后可查看收藏")
+			return
+		}
 		q.Favorites = true
 		keys, err := h.fav.Keys(c.Request.Context(), u.ID)
 		if err != nil {
@@ -112,14 +116,27 @@ func (h *Handlers) handleStream(c *gin.Context) {
 }
 
 // handleThumb GET /api/v1/media/:key/thumb
-// 首期不做服务端缩略图生成（避免引入 FFmpeg）：图片直接回原图，视频回可选缩略图或 404；
-// 不可播放时由前端用 CSS blur 处理（F-16 / 8.风险）。
+// 优先返回服务端生成的缩略图（{data_dir}/thumbs/{key}.jpg，见 B-01）；
+// 图片没有缩略图时回原图，视频没有缩略图时返回 404，由前端用渐变占位（F-16 / 8.风险）。
 func (h *Handlers) handleThumb(c *gin.Context) {
 	key := c.Param("key")
 	item, found := h.media.Get(key)
 	if !found {
 		fail(c, http.StatusNotFound, "media_not_found", "媒体不存在")
 		return
+	}
+	if h.thumbs != nil {
+		if p := h.thumbs.Path(key); h.thumbs.Exists(key) {
+			if f, err := os.Open(p); err == nil {
+				defer f.Close()
+				if st, err := f.Stat(); err == nil && !st.IsDir() {
+					c.Writer.Header().Set("Cache-Control", "public, max-age=86400")
+					c.Writer.Header().Set("Content-Type", "image/jpeg")
+					http.ServeContent(c.Writer, c.Request, filepath.Base(p), st.ModTime(), f)
+					return
+				}
+			}
+		}
 	}
 	if item.Type == models.MediaImage {
 		abs, err := media.ResolveVerified(item)

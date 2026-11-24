@@ -15,13 +15,16 @@ import (
 
 // Item 一个媒体条目。
 type Item struct {
-	Key     string    `json:"key"`
-	Source  string    `json:"source"`
-	RelPath string    `json:"rel_path"`
-	AbsPath string    `json:"-"`
-	Type    string    `json:"media_type"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mod_time"`
+	Key    string `json:"key"`
+	Source string `json:"source"`
+	// RootIndex 媒体根目录序号（多根目录策略隔离与展示用）。
+	RootIndex int       `json:"root_index"`
+	RootName  string    `json:"root_name"`
+	RelPath   string    `json:"rel_path"`
+	AbsPath   string    `json:"-"`
+	Type      string    `json:"media_type"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"mod_time"`
 	// Duration 视频时长（秒），探测失败或图片为 0。
 	Duration float64 `json:"duration"`
 }

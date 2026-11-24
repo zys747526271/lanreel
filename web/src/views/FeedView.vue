@@ -7,6 +7,8 @@ import { useAuthStore } from '@/stores/auth'
 import { useFavoritesStore } from '@/stores/favorites'
 import { logger } from '@/lib/logger'
 import { reasonText } from '@/lib/format'
+import { prefs } from '@/lib/prefs'
+import { recordHistory } from '@/lib/history'
 
 const router = useRouter()
 const feed = useFeedStore()
@@ -15,8 +17,9 @@ const favorites = useFavoritesStore()
 
 const scroller = ref<HTMLElement | null>(null)
 const activeIndex = ref(0)
-const muted = ref(true)
+const muted = ref(prefs.defaultMuted)
 const imageDuration = ref(5)
+const rate = computed(() => prefs.defaultRate)
 const toast = ref('')
 const routeLoading = ref(true)
 let toastTimer: number | null = null
@@ -44,7 +47,19 @@ function onScroll() {
   if (index !== activeIndex.value) {
     activeIndex.value = index
     if (index >= feed.items.length - 3) void feed.loadMore(5)
+    maybeRecordHistory()
   }
+}
+
+let historyTimer: number | null = null
+/** 停留在某条超过 1.5 秒才记入观看历史，避免快速滑动污染列表。 */
+function maybeRecordHistory() {
+  if (!auth.isLoggedIn) return
+  if (historyTimer) window.clearTimeout(historyTimer)
+  historyTimer = window.setTimeout(() => {
+    const item = feed.items[activeIndex.value]
+    if (item) void recordHistory(item)
+  }, 1500)
 }
 
 function next() {
@@ -80,18 +95,17 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 async function onToggleFavorite(key: string) {
+  if (!auth.isLoggedIn) {
+    showToast('登录后可收藏')
+    router.push({ path: '/login', query: { redirect: '/' } })
+    return
+  }
   const item = feed.items.find((i) => i.key === key)
   if (!item) return
   try {
     const nowFavorite = await favorites.toggle(item)
     feed.patchFavorite(key, nowFavorite)
     showToast(nowFavorite ? '已收藏' : '已取消收藏')
-    if (feed.mode === 'favorites' && !nowFavorite) {
-      feed.removeKey(key)
-      await nextTick()
-      if (feed.items.length === 0) await feed.loadMore(8)
-      if (activeIndex.value >= feed.items.length) activeIndex.value = Math.max(0, feed.items.length - 1)
-    }
   } catch (err) {
     showToast(err instanceof Error ? err.message : '收藏失败')
     logger.error('interaction', 'favorites', '收藏操作失败', { error: String(err) })
@@ -102,12 +116,12 @@ function onBlocked(reason: string) {
   showToast(reasonText(reason))
 }
 
-async function switchMode(mode: 'all' | 'favorites') {
-  if (feed.mode === mode) return
-  await feed.setMode(mode)
-  await nextTick()
-  scrollToIndex(0, false)
-  activeIndex.value = 0
+function openFavorites() {
+  if (!auth.isLoggedIn) {
+    router.push({ path: '/login', query: { redirect: '/favorites' } })
+    return
+  }
+  router.push('/favorites')
 }
 
 async function refresh() {
@@ -116,6 +130,7 @@ async function refresh() {
   await feed.loadMore(8)
   await nextTick()
   scrollToIndex(0, false)
+  maybeRecordHistory()
 }
 
 async function loadConfig() {
@@ -135,16 +150,26 @@ async function signOut() {
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
-  await Promise.all([favorites.load(), loadConfig()])
+  // 登录身份变化（游客↔登录、换账号）时重建列表，避免残留上一身份的条目
+  const sessionKey = auth.user ? `u${auth.user.id}` : 'guest'
+  if (sessionStorage.getItem('lanreel.feed.session') !== sessionKey) {
+    feed.reset()
+    sessionStorage.setItem('lanreel.feed.session', sessionKey)
+  }
+  const tasks: Promise<unknown>[] = [loadConfig()]
+  if (auth.isLoggedIn) tasks.push(favorites.load())
+  await Promise.all(tasks)
   await feed.loadMore(8)
-  feed.applyFavoriteKeys(favorites.keys)
+  if (auth.isLoggedIn) feed.applyFavoriteKeys(favorites.keys)
   routeLoading.value = false
-  logger.info('app', 'feed', '进入浏览页', { mode: feed.mode })
+  maybeRecordHistory()
+  logger.info('app', 'feed', '进入浏览页', { guest: !auth.isLoggedIn })
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   if (toastTimer) window.clearTimeout(toastTimer)
+  if (historyTimer) window.clearTimeout(historyTimer)
 })
 
 watch(
@@ -170,22 +195,18 @@ const favoriteCount = computed(() => favorites.count)
         >
           离线
         </span>
-        <div class="flex overflow-hidden rounded-full border border-white/15 bg-black/40 p-0.5 text-xs backdrop-blur">
-          <button
-            class="rounded-full px-3 py-1 transition"
-            :class="feed.mode === 'all' ? 'bg-white text-black' : 'text-white/70 hover:text-white'"
-            @click="switchMode('all')"
-          >
-            随机
-          </button>
-          <button
-            class="rounded-full px-3 py-1 transition"
-            :class="feed.mode === 'favorites' ? 'bg-white text-black' : 'text-white/70 hover:text-white'"
-            @click="switchMode('favorites')"
-          >
-            收藏
-          </button>
-        </div>
+        <span
+          v-if="!auth.isLoggedIn"
+          class="rounded-full border border-white/20 bg-black/40 px-2 py-0.5 text-[10px] text-white/70 backdrop-blur"
+        >
+          游客
+        </span>
+        <button
+          class="rounded-full border border-white/15 bg-black/40 px-3 py-1 text-xs text-white/80 backdrop-blur transition hover:bg-black/60"
+          @click="openFavorites"
+        >
+          收藏夹
+        </button>
       </div>
       <div class="pointer-events-auto flex items-center gap-1.5">
         <button
@@ -219,7 +240,15 @@ const favoriteCount = computed(() => favorites.count)
             <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a1.7 1.7 0 0 0-1.6-1H1.3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 3 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 3a1.7 1.7 0 0 0 1-1.6V1.3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 3c.6.3 1.3.2 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 9v.1c.3.6.9 1 1.6 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1Z" />
           </svg>
         </router-link>
+        <router-link
+          v-if="!auth.isLoggedIn"
+          to="/login"
+          class="rounded-full bg-white px-3 py-2 text-xs font-medium text-black transition hover:bg-white/90"
+        >
+          登录
+        </router-link>
         <button
+          v-else
           class="rounded-full border border-white/15 bg-black/40 p-2 backdrop-blur transition hover:bg-black/60"
           title="退出登录"
           @click="signOut"
@@ -248,6 +277,8 @@ const favoriteCount = computed(() => favorites.count)
           :preload="Math.abs(index - activeIndex) <= 1"
           :image-duration="imageDuration"
           :muted="muted"
+          :rate="rate"
+          @autoplay-muted="showToast('已静音播放，点击画面开启声音')"
           @advance="next"
           @blocked="onBlocked"
           @toggle-favorite="onToggleFavorite"
@@ -272,14 +303,12 @@ const favoriteCount = computed(() => favorites.count)
         <rect x="2.5" y="4.5" width="19" height="15" rx="3" />
         <path d="m9 9 6 3-6 3V9Z" />
       </svg>
-      <p class="text-base font-medium">
-        {{ feed.mode === 'favorites' ? '收藏夹还是空的' : '媒体库暂无可播放内容' }}
-      </p>
+      <p class="text-base font-medium">{{ auth.isLoggedIn ? '媒体库暂无可播放内容' : '游客暂无可看内容' }}</p>
       <p class="max-w-xs text-sm leading-relaxed text-white/50">
         {{
-          feed.mode === 'favorites'
-            ? '在随机浏览时点击右侧 ♥ 收藏喜欢的内容，之后可在这里查看'
-            : '请确认服务端媒体目录已配置正确，或当前内容被管理员策略限制'
+          auth.isLoggedIn
+            ? '请确认服务端媒体目录已配置正确，或当前内容被管理员策略限制'
+            : '管理员尚未对游客开放内容，登录后可以看更多'
         }}
       </p>
       <div class="flex gap-2">
@@ -289,13 +318,13 @@ const favoriteCount = computed(() => favorites.count)
         >
           重新加载
         </button>
-        <button
-          v-if="feed.mode === 'favorites'"
+        <router-link
+          v-if="!auth.isLoggedIn"
+          to="/login"
           class="rounded-full border border-white/20 px-4 py-2 text-sm text-white/80 transition hover:bg-white/10"
-          @click="switchMode('all')"
         >
-          去看随机流
-        </button>
+          登录 / 注册
+        </router-link>
       </div>
     </div>
 
@@ -305,6 +334,7 @@ const favoriteCount = computed(() => favorites.count)
       class="absolute bottom-44 right-3 z-30 flex flex-col items-center gap-5"
     >
       <button
+        v-if="auth.isLoggedIn"
         class="group flex flex-col items-center gap-1"
         data-action="favorite"
         @click="onToggleFavorite(currentItem.key)"
@@ -325,7 +355,10 @@ const favoriteCount = computed(() => favorites.count)
         </span>
         <span class="text-[11px] text-white/70" data-role="favorite-count">{{ favoriteCount }}</span>
       </button>
-      <router-link to="/settings" class="flex flex-col items-center gap-1">
+      <router-link
+        :to="auth.isLoggedIn ? '/settings' : '/login'"
+        class="flex flex-col items-center gap-1"
+      >
         <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-black/40 backdrop-blur">
           <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
             <circle cx="12" cy="12" r="9" />

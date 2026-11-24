@@ -71,6 +71,10 @@ type Scanner struct {
 	// rootsMu 保护可变媒体根目录（后台可热更新，见 CR-003）。
 	rootsMu sync.RWMutex
 	roots   []string
+
+	// onScan 扫描完成后的回调（例如把条目交给缩略图生成器）。
+	onScanMu sync.RWMutex
+	onScan   func([]*Item)
 }
 
 // NewScanner 构造扫描器。
@@ -78,6 +82,13 @@ func NewScanner(cfg *config.Config, store MetaStore, logger *logging.Logger) *Sc
 	s := &Scanner{cfg: cfg, meta: store, log: logger, roots: append([]string(nil), cfg.Media.Roots...)}
 	s.snap.Store(&Snapshot{ByKey: map[string]*Item{}})
 	return s
+}
+
+// SetOnScan 注册扫描完成回调。
+func (s *Scanner) SetOnScan(fn func([]*Item)) {
+	s.onScanMu.Lock()
+	s.onScan = fn
+	s.onScanMu.Unlock()
 }
 
 // Roots 返回当前生效的媒体根目录快照。
@@ -102,6 +113,19 @@ func (s *Scanner) SetRoots(roots []string) {
 	s.rootsMu.Lock()
 	s.roots = clean
 	s.rootsMu.Unlock()
+}
+
+// RootDisplayName 返回媒体根目录的展示名（取路径最后一段，盘符根保留盘符）。
+func RootDisplayName(root string) string {
+	clean := filepath.Clean(root)
+	name := filepath.Base(clean)
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		if v := filepath.VolumeName(clean); v != "" {
+			return v
+		}
+		return clean
+	}
+	return name
 }
 
 // NormalizeRoot 校验并归一化一个媒体根目录：必须是存在的绝对路径目录。
@@ -259,13 +283,15 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 			seen[key] = true
 
 			item := &Item{
-				Key:     key,
-				Source:  s.cfg.App.SourceID,
-				RelPath: rel,
-				AbsPath: p,
-				Type:    kind,
-				Size:    info.Size(),
-				ModTime: info.ModTime(),
+				Key:       key,
+				Source:    s.cfg.App.SourceID,
+				RootIndex: idx,
+				RootName:  RootDisplayName(root),
+				RelPath:   rel,
+				AbsPath:   p,
+				Type:      kind,
+				Size:      info.Size(),
+				ModTime:   info.ModTime(),
 			}
 			if kind == models.MediaVideo {
 				if m, ok := cached[key]; ok && m.MediaType == models.MediaVideo {
@@ -335,6 +361,12 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 	}
 
 	s.snap.Store(newSnap)
+	s.onScanMu.RLock()
+	hook := s.onScan
+	s.onScanMu.RUnlock()
+	if hook != nil {
+		hook(items)
+	}
 	summary.FinishedAt = time.Now()
 	summary.DurationMS = summary.FinishedAt.Sub(started).Milliseconds()
 

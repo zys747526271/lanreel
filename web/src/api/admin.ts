@@ -42,14 +42,40 @@ export function listDirs(path = '') {
   return request<{ data: DirListing }>(`/admin/fs/dirs${q}`)
 }
 
+// ---------- 缩略图 ----------
+export interface ThumbStatsPayload {
+  stats: {
+    enabled: boolean
+    ffmpeg_available: boolean
+    ffmpeg_path?: string
+    generated: number
+    failed: number
+    queued: number
+  }
+  videos: number
+  images: number
+  video_thumbs: number
+  image_thumbs: number
+}
+
+export function getThumbStats() {
+  return request<{ data: ThumbStatsPayload }>('/admin/thumbs/stats')
+}
+
+export function rebuildThumbs() {
+  return request<{ data: { queued: number } }>('/admin/thumbs/rebuild', { method: 'POST' })
+}
+
 // ---------- 文件夹策略 ----------
 export function listFolders() {
   return request<{ data: FolderPolicyView[] }>('/admin/folders')
 }
 
 export function setFolderPolicy(payload: {
+  root_index: number
   folder_path: string
   enabled: boolean
+  guest_enabled: boolean
   schedule_type: ScheduleType
   time_start?: string
   time_end?: string
@@ -57,9 +83,9 @@ export function setFolderPolicy(payload: {
   return request<{ data: FolderPolicyView }>('/admin/folders', { method: 'PUT', body: payload })
 }
 
-export function deleteFolderPolicy(folderPath: string) {
+export function deleteFolderPolicy(rootIndex: number, folderPath: string) {
   return request<{ data: { success: boolean } }>(
-    `/admin/folders?folder_path=${encodeURIComponent(folderPath)}`,
+    `/admin/folders?root_index=${rootIndex}&folder_path=${encodeURIComponent(folderPath)}`,
     { method: 'DELETE' },
   )
 }
@@ -76,7 +102,14 @@ export function listFiles(params: { page?: number; page_size?: number; keyword?:
 
 export function setFileOverride(
   key: string,
-  payload: { enabled: boolean; schedule_type: ScheduleType; time_start?: string; time_end?: string; note?: string },
+  payload: {
+    enabled: boolean
+    guest_enabled: boolean
+    schedule_type: ScheduleType
+    time_start?: string
+    time_end?: string
+    note?: string
+  },
 ) {
   return request<{ data: FileView }>(`/admin/files/${key}`, { method: 'PUT', body: payload })
 }

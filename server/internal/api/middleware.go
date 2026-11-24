@@ -152,6 +152,32 @@ func (h *Handlers) requireAuth() gin.HandlerFunc {
 	}
 }
 
+// optionalAuth 可选鉴权：无令牌按游客放行；带令牌则必须有效（失效返回 401，
+// 让前端走刷新流程，避免把已登录用户静默降级为游客）。
+func (h *Handlers) optionalAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := extractToken(c)
+		if token == "" {
+			c.Next()
+			return
+		}
+		u, err := h.auth.Authenticate(c.Request.Context(), token)
+		if err != nil {
+			code := "unauthorized"
+			msg := "登录状态已失效，请重新登录"
+			if errors.Is(err, service.ErrUserDisabled) {
+				code, msg = "user_disabled", "账号已被禁用"
+			}
+			fail(c, http.StatusUnauthorized, code, msg)
+			c.Abort()
+			return
+		}
+		ctx := reqctx.WithUser(c.Request.Context(), u)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
 // requireAdmin 管理员权限中间件（N-16）。
 func (h *Handlers) requireAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {

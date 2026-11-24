@@ -24,6 +24,9 @@ export interface TokenPair {
 export interface MediaItem {
   key: string
   media_type: MediaType
+  /** 媒体根索引与名称（多根目录展示用） */
+  root_index: number
+  root_name: string
   rel_path: string
   folder: string
   duration: number
@@ -38,6 +41,8 @@ export interface MediaItem {
 }
 
 export interface PublicConfig {
+  /** 是否允许游客（未登录）浏览媒体 */
+  guest_access?: boolean
   app: string
   version: string
   registration_open: boolean
@@ -49,17 +54,22 @@ export interface PublicConfig {
 }
 
 export interface FolderPolicyView {
+  /** 媒体根索引；-1 表示全局默认策略 */
+  root_index: number
+  root_name: string
   folder_path: string
   total: number
   videos: number
   images: number
   enabled: boolean
+  guest_enabled: boolean
   schedule_type: ScheduleType
   time_start: string
   time_end: string
   configured: boolean
   inherited: boolean
   inherited_from: string
+  inherited_root: number
   updated_at?: string
 }
 
@@ -67,6 +77,7 @@ export interface FileOverride {
   id: number
   video_key: string
   enabled: boolean
+  guest_enabled: boolean
   schedule_type: ScheduleType
   time_start: string
   time_end: string
@@ -76,6 +87,8 @@ export interface FileOverride {
 
 export interface FileView {
   key: string
+  root_index: number
+  root_name: string
   rel_path: string
   media_type: MediaType
   folder: string
@@ -83,6 +96,8 @@ export interface FileView {
   size: number
   playable: boolean
   reason?: string
+  guest_playable: boolean
+  guest_reason?: string
   override?: FileOverride
 }
 

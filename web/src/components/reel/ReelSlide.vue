@@ -15,6 +15,8 @@ const props = defineProps<{
   preload: boolean
   imageDuration: number
   muted: boolean
+  /** 播放倍速（1 表示原速） */
+  rate?: number
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +24,8 @@ const emit = defineEmits<{
   (e: 'blocked', reason: string): void
   (e: 'toggle-favorite', key: string): void
   (e: 'player-error', payload: { key: string; message: string }): void
+  /** 浏览器阻止有声自动播放，已降级为静音；用户首次交互后可恢复 */
+  (e: 'autoplay-muted'): void
 }>()
 
 const videoEl = ref<HTMLVideoElement | null>(null)
@@ -33,6 +37,13 @@ const imageProgress = ref(0)
 const imageLoaded = ref(false)
 /** 用户是否手动暂停：为 true 时自动播放逻辑不再抢占控制权 */
 const userPaused = ref(false)
+/** 浏览器自动播放策略导致的有声播放失败：临时静音，等用户手势后恢复 */
+const forcedMute = ref(false)
+/** 解除降级静音的那一次点击不再触发暂停（否则用户点一下会同时静音恢复+暂停） */
+let suppressNextClick = false
+/** 进度条拖动状态（只有按下才跳转，见 F-04 修复） */
+const seeking = ref(false)
+const seekRatio = ref(0)
 
 let imageTimer: number | null = null
 let progressRaf = 0
@@ -76,12 +87,41 @@ function startImageTimer() {
 async function tryPlay() {
   const el = videoEl.value
   if (!el) return
+  el.muted = props.muted || forcedMute.value
   try {
     await el.play()
     playing.value = true
   } catch {
-    // 浏览器自动播放策略限制：保持静音状态后可重试，不视为错误
+    // 有声自动播放被浏览器拦截：降级为静音重试，并提示用户点击恢复声音。
+    if (!el.muted) {
+      forcedMute.value = true
+      el.muted = true
+      emit('autoplay-muted')
+      try {
+        await el.play()
+        playing.value = true
+        return
+      } catch {
+        playing.value = false
+        return
+      }
+    }
     playing.value = false
+  }
+}
+
+/** 用户首次交互后解除降级静音（必须在手势回调里执行）。 */
+function onFirstGesture() {
+  if (!forcedMute.value) return
+  forcedMute.value = false
+  suppressNextClick = true
+  const el = videoEl.value
+  if (!el) return
+  el.muted = props.muted
+  if (props.active && !userPaused.value) {
+    void el.play().catch(() => {
+      playing.value = false
+    })
   }
 }
 
@@ -94,6 +134,10 @@ function pause() {
 
 function onTogglePlay(event?: Event) {
   event?.stopPropagation()
+  if (suppressNextClick) {
+    suppressNextClick = false
+    return
+  }
   if (!canRender.value || props.item.media_type !== 'video') return
   const el = videoEl.value
   if (!el) return
@@ -113,7 +157,7 @@ function onCanPlay() {
 
 function onTimeUpdate() {
   const el = videoEl.value
-  if (!el) return
+  if (!el || seeking.value) return
   current.value = el.currentTime
   if (el.duration && Number.isFinite(el.duration)) duration.value = el.duration
 }
@@ -124,26 +168,54 @@ function seekByRatio(ratio: number) {
   el.currentTime = Math.max(0, Math.min(1, ratio)) * duration.value
 }
 
-function onProgressPointer(event: PointerEvent) {
+function ratioFromEvent(event: PointerEvent): number {
   const target = event.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
-  const ratio = (event.clientX - rect.left) / rect.width
-  seekByRatio(ratio)
-  if (event.type === 'pointermove' && event.buttons !== 1) return
-  const move = (e: PointerEvent) => onProgressPointer(e as PointerEvent)
-  const up = () => {
-    window.removeEventListener('pointermove', move)
-    window.removeEventListener('pointerup', up)
-  }
-  if (event.type === 'pointerdown') {
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
-  }
+  if (rect.width <= 0) return 0
+  return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
 }
+
+/**
+ * 进度条交互（F-04）：
+ * - 只有按下（pointerdown）才跳转，鼠标悬停/触摸滑过都不改变播放位置；
+ * - 按住拖动实时更新，松手保持；
+ * - 拖动期间暂停 timeupdate 覆盖进度显示，避免抖动。
+ */
+function onProgressDown(event: PointerEvent) {
+  if (!canRender.value) return
+  const ratio = ratioFromEvent(event)
+  seeking.value = true
+  seekRatio.value = ratio
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+  seekByRatio(ratio)
+}
+
+function onProgressMove(event: PointerEvent) {
+  if (!seeking.value) return
+  const ratio = ratioFromEvent(event)
+  seekRatio.value = ratio
+  seekByRatio(ratio)
+}
+
+function onProgressUp(event: PointerEvent) {
+  if (!seeking.value) return
+  seekByRatio(ratioFromEvent(event))
+  seeking.value = false
+  ;(event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId)
+}
+
+const displayRatio = computed(() => {
+  if (seeking.value) return seekRatio.value
+  return duration.value ? Math.min(1, current.value / duration.value) : 0
+})
+
+const seekPreviewText = computed(() => formatDuration(seekRatio.value * duration.value))
 
 function onLoadedMetadata() {
   const el = videoEl.value
-  if (el && Number.isFinite(el.duration)) duration.value = el.duration
+  if (!el) return
+  if (Number.isFinite(el.duration)) duration.value = el.duration
+  el.playbackRate = props.rate ?? 1
 }
 
 function onVideoError() {
@@ -200,7 +272,8 @@ onMounted(() => {
 // <video> 元素在 v-if 渲染完成后才可用，元素出现时补一次播放尝试。
 watch(videoEl, (el) => {
   if (el) {
-    el.muted = props.muted
+    el.muted = props.muted || forcedMute.value
+    el.playbackRate = props.rate ?? 1
     if (props.active) void tryPlay()
   }
 })
@@ -208,13 +281,27 @@ watch(videoEl, (el) => {
 watch(
   () => props.muted,
   (muted) => {
-    if (videoEl.value) videoEl.value.muted = muted
+    if (videoEl.value) videoEl.value.muted = muted || forcedMute.value
+  },
+)
+
+watch(
+  () => props.rate,
+  (rate) => {
+    if (videoEl.value) videoEl.value.playbackRate = rate ?? 1
   },
 )
 
 onBeforeUnmount(() => {
   clearImageTimer()
   pause()
+  document.removeEventListener('pointerdown', onFirstGesture)
+})
+
+// 降级静音后，任意点击/触摸都可恢复声音（浏览器要求在手势回调中调用 play）。
+watch(forcedMute, (v) => {
+  if (v) document.addEventListener('pointerdown', onFirstGesture, { passive: true })
+  else document.removeEventListener('pointerdown', onFirstGesture)
 })
 </script>
 
@@ -223,7 +310,7 @@ onBeforeUnmount(() => {
     <!-- 不可播放：模糊预览 + 原因说明（F-16） -->
     <div v-if="!item.playable" class="absolute inset-0">
       <img
-        v-if="item.media_type === 'image' && thumb"
+        v-if="thumb"
         :src="thumb"
         class="h-full w-full scale-110 object-cover opacity-60 blur-2xl"
         alt=""
@@ -286,22 +373,37 @@ onBeforeUnmount(() => {
         </div>
       </transition>
 
-      <!-- 进度条（可拖拽，F-04） -->
+      <!-- 进度条：按下才跳转、按住可拖动（F-04） -->
       <div class="absolute inset-x-0 bottom-0 z-10 px-4 pb-3 pt-6">
         <div
-          class="group relative h-6 cursor-pointer touch-none select-none"
-          @pointerdown="onProgressPointer"
-          @pointermove="onProgressPointer"
+          class="group relative h-8 cursor-pointer touch-none select-none"
+          @pointerdown.prevent="onProgressDown"
+          @pointermove="onProgressMove"
+          @pointerup="onProgressUp"
+          @pointercancel="onProgressUp"
         >
           <div class="absolute top-1/2 h-[3px] w-full -translate-y-1/2 rounded-full bg-white/25">
             <div
               class="h-full rounded-full bg-white/90"
-              :style="{ width: duration ? `${Math.min(100, (current / duration) * 100)}%` : '0%' }"
+              :style="{ width: `${displayRatio * 100}%` }"
             ></div>
           </div>
+          <!-- 拖动把手：平时隐藏，按下或悬浮时出现 -->
+          <div
+            class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow transition-opacity"
+            :class="seeking ? 'opacity-100' : 'opacity-0 group-hover:opacity-80'"
+            :style="{ left: `${displayRatio * 100}%` }"
+          ></div>
+          <div
+            v-if="seeking"
+            class="pointer-events-none absolute -top-7 -translate-x-1/2 rounded bg-black/75 px-1.5 py-0.5 text-[11px] text-white"
+            :style="{ left: `${displayRatio * 100}%` }"
+          >
+            {{ seekPreviewText }}
+          </div>
         </div>
-        <div class="mt-1 flex items-center justify-between text-[11px] text-white/70">
-          <span>{{ formatDuration(current) }}</span>
+        <div class="mt-0.5 flex items-center justify-between text-[11px] text-white/70">
+          <span>{{ formatDuration(seeking ? seekRatio * duration : current) }}</span>
           <span>{{ formatDuration(duration) }}</span>
         </div>
       </div>

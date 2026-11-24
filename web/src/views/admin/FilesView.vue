@@ -34,11 +34,12 @@ const showModal = ref(false)
 const current = ref<FileView | null>(null)
 const form = ref<{
   enabled: boolean
+  guest_enabled: boolean
   schedule_type: ScheduleType
   time_start: string
   time_end: string
   note: string
-}>({ enabled: true, schedule_type: 'always', time_start: '18:00', time_end: '23:00', note: '' })
+}>({ enabled: true, guest_enabled: true, schedule_type: 'always', time_start: '18:00', time_end: '23:00', note: '' })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -84,6 +85,7 @@ function openEdit(file: FileView) {
   const o = file.override
   form.value = {
     enabled: o?.enabled ?? true,
+    guest_enabled: o?.guest_enabled ?? true,
     schedule_type: o?.schedule_type ?? 'always',
     time_start: o?.time_start || '18:00',
     time_end: o?.time_end || '23:00',
@@ -102,7 +104,8 @@ async function save() {
   try {
     await setFileOverride(current.value.key, {
       enabled: form.value.enabled,
-      schedule_type: form.value.enabled ? form.value.schedule_type : 'disabled',
+      guest_enabled: form.value.guest_enabled,
+      schedule_type: form.value.enabled || form.value.guest_enabled ? form.value.schedule_type : 'disabled',
       time_start: form.value.time_start,
       time_end: form.value.time_end,
       note: form.value.note,
@@ -135,9 +138,14 @@ function clearOverride(file: FileView) {
   })
 }
 
-function statusLabel(f: FileView) {
-  if (f.playable) return { text: '普通用户可播', type: 'success' as const }
+function userStatus(f: FileView) {
+  if (f.playable) return { text: '可播', type: 'success' as const }
   return { text: reasonText(f.reason), type: 'error' as const }
+}
+
+function guestStatus(f: FileView) {
+  if (f.guest_playable) return { text: '可播', type: 'success' as const }
+  return { text: reasonText(f.guest_reason), type: 'error' as const }
 }
 
 onMounted(async () => {
@@ -161,8 +169,12 @@ onMounted(async () => {
             @change="search"
           >
             <option value="">全部文件夹</option>
-            <option v-for="f in folders" :key="f.folder_path" :value="f.folder_path">
-              {{ f.folder_path || '/（根目录）' }}
+            <option
+              v-for="f in folders.filter((x) => x.root_index >= 0 && x.folder_path !== '')"
+              :key="`${f.root_index}:${f.folder_path}`"
+              :value="f.folder_path"
+            >
+              {{ f.root_name }} › {{ f.folder_path }}
             </option>
           </select>
         </div>
@@ -170,7 +182,7 @@ onMounted(async () => {
         <n-button @click="load">刷新</n-button>
       </div>
       <p class="mt-2 text-xs text-slate-400">
-        列表按普通用户视角显示生效状态；管理员预览不受策略限制。共 {{ total }} 个文件。
+        分别按普通用户与游客视角显示生效状态；管理员预览不受策略限制。共 {{ total }} 个文件。
       </p>
     </n-card>
 
@@ -182,7 +194,8 @@ onMounted(async () => {
               <th class="px-4 py-2.5 text-left font-medium">文件</th>
               <th class="px-4 py-2.5 text-left font-medium">类型</th>
               <th class="px-4 py-2.5 text-left font-medium">大小 / 时长</th>
-              <th class="px-4 py-2.5 text-left font-medium">生效状态</th>
+              <th class="px-4 py-2.5 text-left font-medium">普通用户</th>
+              <th class="px-4 py-2.5 text-left font-medium">游客</th>
               <th class="px-4 py-2.5 text-left font-medium">文件级策略</th>
               <th class="px-4 py-2.5 text-right font-medium">操作</th>
             </tr>
@@ -190,7 +203,10 @@ onMounted(async () => {
           <tbody class="divide-y divide-slate-100">
             <tr v-for="f in files" :key="f.key" class="hover:bg-slate-50/70">
               <td class="max-w-[320px] px-4 py-2.5">
-                <p class="truncate font-mono text-xs text-slate-800" :title="f.rel_path">{{ f.rel_path }}</p>
+                <div class="flex items-center gap-1.5">
+                  <n-tag size="tiny" :bordered="false">{{ f.root_name }}</n-tag>
+                  <span class="truncate font-mono text-xs text-slate-800" :title="f.rel_path">{{ f.rel_path }}</span>
+                </div>
                 <p class="mt-0.5 font-mono text-[10px] text-slate-400">{{ f.key }}</p>
               </td>
               <td class="px-4 py-2.5 text-xs text-slate-600">{{ f.media_type === 'video' ? '视频' : '图片' }}</td>
@@ -198,12 +214,15 @@ onMounted(async () => {
                 {{ formatBytes(f.size) }}<span v-if="f.duration"> · {{ formatDuration(f.duration) }}</span>
               </td>
               <td class="px-4 py-2.5">
-                <n-tag size="small" :type="statusLabel(f).type" :bordered="false">{{ statusLabel(f).text }}</n-tag>
+                <n-tag size="small" :type="userStatus(f).type" :bordered="false">{{ userStatus(f).text }}</n-tag>
+              </td>
+              <td class="px-4 py-2.5">
+                <n-tag size="small" :type="guestStatus(f).type" :bordered="false">{{ guestStatus(f).text }}</n-tag>
               </td>
               <td class="px-4 py-2.5 text-xs text-slate-500">
                 <template v-if="f.override">
                   <span class="font-medium text-slate-700">
-                    {{ f.override.enabled ? (f.override.schedule_type === 'time_window' ? '时间窗口' : '启用') : '禁用' }}
+                    普通{{ f.override.enabled ? '开' : '关' }} / 游客{{ f.override.guest_enabled ? '开' : '关' }}
                   </span>
                   <span v-if="f.override.schedule_type === 'time_window'" class="ml-1">
                     {{ f.override.time_start }}–{{ f.override.time_end }}
@@ -218,7 +237,7 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-if="!files.length && !loading">
-              <td colspan="6" class="px-4 py-10 text-center text-sm text-slate-400">没有匹配的文件</td>
+              <td colspan="7" class="px-4 py-10 text-center text-sm text-slate-400">没有匹配的文件</td>
             </tr>
           </tbody>
         </table>
@@ -242,21 +261,32 @@ onMounted(async () => {
 
         <div class="flex items-center justify-between">
           <div>
-            <p class="font-medium">允许播放</p>
+            <p class="font-medium">普通用户可播</p>
             <p class="text-xs text-slate-500">关闭将覆盖文件夹策略，直接禁用该文件</p>
           </div>
           <n-switch v-model:value="form.enabled" />
         </div>
 
-        <div v-if="form.enabled">
-          <p class="mb-2 text-xs text-slate-500">播放时段</p>
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="font-medium">游客可播</p>
+            <p class="text-xs text-slate-500">未登录访问的用户</p>
+          </div>
+          <n-switch v-model:value="form.guest_enabled" />
+        </div>
+
+        <div v-if="form.enabled || form.guest_enabled">
+          <p class="mb-2 text-xs text-slate-500">播放时段（两个受众共用）</p>
           <n-radio-group v-model:value="form.schedule_type">
             <n-radio-button value="always">始终可播</n-radio-button>
             <n-radio-button value="time_window">时间窗口</n-radio-button>
           </n-radio-group>
         </div>
 
-        <div v-if="form.enabled && form.schedule_type === 'time_window'" class="grid grid-cols-2 gap-3">
+        <div
+          v-if="(form.enabled || form.guest_enabled) && form.schedule_type === 'time_window'"
+          class="grid grid-cols-2 gap-3"
+        >
           <div>
             <p class="mb-1 text-xs text-slate-500">开始时间</p>
             <n-input v-model:value="form.time_start" placeholder="18:00" />

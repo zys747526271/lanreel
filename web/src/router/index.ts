@@ -8,7 +8,8 @@ const router = createRouter({
       path: '/',
       name: 'feed',
       component: () => import('@/views/FeedView.vue'),
-      meta: { requiresAuth: true, title: '浏览' },
+      // 游客可直接浏览，可见范围由服务端策略的「游客可见」控制
+      meta: { title: '浏览' },
     },
     {
       path: '/setup',
@@ -27,6 +28,24 @@ const router = createRouter({
       name: 'register',
       component: () => import('@/views/RegisterView.vue'),
       meta: { title: '注册' },
+    },
+    {
+      path: '/favorites',
+      name: 'favorites',
+      component: () => import('@/views/FavoritesView.vue'),
+      meta: { requiresAuth: true, title: '收藏夹' },
+    },
+    {
+      path: '/favorites/play',
+      name: 'favorites-play',
+      component: () => import('@/views/FavoritesPlayView.vue'),
+      meta: { requiresAuth: true, title: '收藏播放' },
+    },
+    {
+      path: '/play',
+      name: 'history-play',
+      component: () => import('@/views/FavoritesPlayView.vue'),
+      meta: { requiresAuth: true, title: '观看历史' },
     },
     {
       path: '/forbidden',

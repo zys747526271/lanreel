@@ -1,16 +1,17 @@
 /**
  * 轻量 IndexedDB 封装（无第三方依赖）。
  *
- * 三个 object store 互相隔离（N-08 / N-27）：
+ * object store 互相隔离（N-08 / N-27）：
  *  - favorites  收藏缓存
  *  - user_state 用户状态与配置缓存
  *  - app_logs   前端分类日志（独立 store，便于单独清理与容量控制）
+ *  - history    观看历史（本地，仅记录用户自己看过的条目）
  */
 
 const DB_NAME = 'lanreel'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
-export type StoreName = 'favorites' | 'user_state' | 'app_logs'
+export type StoreName = 'favorites' | 'user_state' | 'app_logs' | 'history'
 
 let dbPromise: Promise<IDBDatabase> | null = null
 
@@ -35,6 +36,10 @@ function openDB(): Promise<IDBDatabase> {
         store.createIndex('ts', 'ts')
         store.createIndex('category', 'category')
         store.createIndex('level', 'level')
+      }
+      if (!db.objectStoreNames.contains('history')) {
+        const store = db.createObjectStore('history', { keyPath: 'key' })
+        store.createIndex('played_at', 'played_at')
       }
     }
     req.onsuccess = () => resolve(req.result)

@@ -68,6 +68,15 @@ sudo systemctl status lanreel
 > NAS 上请把媒体目录挂载为只读，数据目录（`/opt/lanreel/data`）挂载到持久卷，
 > 这样业务库与日志库在重启后仍然保留。
 
+**可选：安装 ffmpeg**（用于视频缩略图；不装也能正常播放，只是视频没有预览图）
+
+```bash
+sudo apt install ffmpeg     # Debian/Ubuntu
+# 或在 config.yaml 里指定：media.ffmpeg_path: "/usr/bin/ffmpeg"
+```
+
+安装后在后台「媒体目录 → 缩略图 → 重新生成」即可补齐历史文件的缩略图。
+
 ## 4. Docker / docker-compose
 
 ```bash

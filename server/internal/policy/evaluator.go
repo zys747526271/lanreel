@@ -29,17 +29,37 @@ type Decision struct {
 	Reason   string
 }
 
+// Viewer 判定身份（管理员 / 普通用户 / 游客）。
+type Viewer struct {
+	IsAdmin bool
+	IsGuest bool
+}
+
+// ForUser 由用户对象生成身份：nil 视为游客。
+func ForUser(u *models.User) Viewer {
+	if u == nil {
+		return Viewer{IsGuest: true}
+	}
+	return Viewer{IsAdmin: u.IsAdmin()}
+}
+
+// folderKey 文件夹策略的主键：根索引 + 源内相对路径（B-07）。
+type folderKey struct {
+	Root int
+	Path string
+}
+
 // Evaluator 可见性判定器。
 type Evaluator struct {
 	src Source
 	loc *time.Location
 	log *logging.Logger
 
-	mu        sync.RWMutex
-	folders   map[string]models.FolderPolicy
-	files     map[string]models.FileOverride
-	loadedAt  time.Time
-	cacheTTL  time.Duration
+	mu       sync.RWMutex
+	folders  map[folderKey]models.FolderPolicy
+	files    map[string]models.FileOverride
+	loadedAt time.Time
+	cacheTTL time.Duration
 }
 
 // NewEvaluator 构造判定器。
@@ -64,12 +84,12 @@ func (e *Evaluator) load(ctx context.Context) {
 	if fresh {
 		return
 	}
-	folders := map[string]models.FolderPolicy{}
+	folders := map[folderKey]models.FolderPolicy{}
 	files := map[string]models.FileOverride{}
 	if e.src != nil {
 		if list, err := e.src.ListFolderPolicies(ctx); err == nil {
 			for _, p := range list {
-				folders[media.NormalizeFolderPath(p.FolderPath)] = p
+				folders[folderKey{Root: p.RootIndex, Path: media.NormalizeFolderPath(p.FolderPath)}] = p
 			}
 		}
 		if m, err := e.src.ListFileOverrides(ctx); err == nil {
@@ -83,13 +103,16 @@ func (e *Evaluator) load(ctx context.Context) {
 	e.mu.Unlock()
 }
 
-// Evaluate 判定某媒体对某用户是否可播放。
-func (e *Evaluator) Evaluate(ctx context.Context, item *media.Item, isAdmin bool, now time.Time) Decision {
+// Evaluate 判定某媒体对某身份是否可播放。
+//
+// 可见性维度：文件级覆盖 > 文件夹策略（同根最长前缀）> 全局默认策略（RootGlobal）> 允许。
+// 每个策略分别控制普通用户（Enabled）与游客（GuestEnabled）是否可见，时间窗口共用。
+func (e *Evaluator) Evaluate(ctx context.Context, item *media.Item, v Viewer, now time.Time) Decision {
 	if item == nil {
 		return Decision{Playable: false, Reason: models.ReasonFileMissing}
 	}
 	// 管理员不受内容策略限制，便于后台预览与实际排查。
-	if isAdmin {
+	if v.IsAdmin {
 		return Decision{Playable: true}
 	}
 	e.load(ctx)
@@ -97,53 +120,79 @@ func (e *Evaluator) Evaluate(ctx context.Context, item *media.Item, isAdmin bool
 	defer e.mu.RUnlock()
 
 	if ov, ok := e.files[item.Key]; ok {
-		if !ov.Enabled || ov.ScheduleType == models.ScheduleDisabled {
-			return Decision{Playable: false, Reason: models.ReasonDisabledByAdmin}
-		}
-		if ov.ScheduleType == models.ScheduleTimeWindow && !InWindow(now.In(e.loc), ov.TimeStart, ov.TimeEnd, e.loc) {
-			return Decision{Playable: false, Reason: models.ReasonOutOfWindow}
-		}
-		return Decision{Playable: true}
+		return e.decide(ov.Enabled, ov.GuestEnabled, ov.ScheduleType, ov.TimeStart, ov.TimeEnd, v, now)
 	}
-
-	if p, ok := e.matchFolder(item.Folder()); ok {
-		if !p.Enabled || p.ScheduleType == models.ScheduleDisabled {
-			return Decision{Playable: false, Reason: models.ReasonDisabledByAdmin}
-		}
-		if p.ScheduleType == models.ScheduleTimeWindow && !InWindow(now.In(e.loc), p.TimeStart, p.TimeEnd, e.loc) {
-			return Decision{Playable: false, Reason: models.ReasonOutOfWindow}
-		}
-		return Decision{Playable: true}
+	if p, ok := e.matchFolder(item.RootIndex, item.Folder()); ok {
+		return e.decide(p.Enabled, p.GuestEnabled, p.ScheduleType, p.TimeStart, p.TimeEnd, v, now)
 	}
 	return Decision{Playable: true}
 }
 
-// MatchFolder 最长前缀匹配文件夹策略。
-// 根目录策略（folder_path 为空）作为全局默认策略，对未单独配置的子目录生效。
-func (e *Evaluator) MatchFolder(ctx context.Context, folder string) (models.FolderPolicy, bool) {
+// decide 依据受众与时间窗给出判定。
+func (e *Evaluator) decide(enabled, guestEnabled bool, scheduleType, start, end string, v Viewer, now time.Time) Decision {
+	visible := enabled
+	if v.IsGuest {
+		visible = guestEnabled
+	}
+	if !visible || scheduleType == models.ScheduleDisabled {
+		return Decision{Playable: false, Reason: models.ReasonDisabledByAdmin}
+	}
+	if scheduleType == models.ScheduleTimeWindow && !InWindow(now.In(e.loc), start, end, e.loc) {
+		return Decision{Playable: false, Reason: models.ReasonOutOfWindow}
+	}
+	return Decision{Playable: true}
+}
+
+// MatchFolder 按根索引做最长前缀匹配，未命中时回落到全局默认策略。
+func (e *Evaluator) MatchFolder(ctx context.Context, rootIndex int, folder string) (models.FolderPolicy, bool) {
 	e.load(ctx)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.matchFolder(folder)
+	return e.matchFolder(rootIndex, folder)
 }
 
 // matchFolder 最长前缀匹配文件夹策略（须在持锁状态下调用）。
-func (e *Evaluator) matchFolder(folder string) (models.FolderPolicy, bool) {
+// 同一根内，目录路径越长优先级越高；根目录策略（空串）在该根内优先级最低。
+// 该根没有任何策略时，使用 RootGlobal 的全局默认策略。
+func (e *Evaluator) matchFolder(rootIndex int, folder string) (models.FolderPolicy, bool) {
 	folder = media.NormalizeFolderPath(folder)
 	best := ""
 	var bestPolicy models.FolderPolicy
 	found := false
-	for path, p := range e.folders {
-		if path == "" {
-			// 根目录策略：匹配任何层级，优先级最低。
+	for k, p := range e.folders {
+		if k.Root != rootIndex {
+			continue
+		}
+		if k.Path == "" {
 			if !found {
 				best, bestPolicy, found = "", p, true
 			}
 			continue
 		}
-		if folder == path || strings.HasPrefix(folder, path+"/") {
-			if len(path) >= len(best) {
-				best, bestPolicy, found = path, p, true
+		if folder == k.Path || strings.HasPrefix(folder, k.Path+"/") {
+			if len(k.Path) >= len(best) {
+				best, bestPolicy, found = k.Path, p, true
+			}
+		}
+	}
+	if found {
+		return bestPolicy, true
+	}
+	// 回落到全局默认策略（对所有根生效）。
+	best = ""
+	for k, p := range e.folders {
+		if k.Root != models.RootGlobal {
+			continue
+		}
+		if k.Path == "" {
+			if !found {
+				best, bestPolicy, found = "", p, true
+			}
+			continue
+		}
+		if folder == k.Path || strings.HasPrefix(folder, k.Path+"/") {
+			if len(k.Path) >= len(best) {
+				best, bestPolicy, found = k.Path, p, true
 			}
 		}
 	}
