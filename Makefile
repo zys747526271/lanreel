@@ -17,6 +17,13 @@ WEB_DIR := web
 EMBED_DIR := server/internal/webui/dist
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+# Windows 下必须输出 .exe，否则用户双击 dist/lanreel.exe 会命中旧文件
+ifeq ($(OS),Windows_NT)
+  BIN := $(BIN_DIR)/lanreel.exe
+else
+  BIN := $(BIN_DIR)/lanreel
+endif
+
 .PHONY: all build web embed server dev clean test
 
 all: build
@@ -29,7 +36,7 @@ embed: web
 	cp -r $(WEB_DIR)/dist/. $(EMBED_DIR)/
 
 server: embed
-	cd server && $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o ../$(BIN_DIR)/lanreel ./cmd/lanreel
+	cd server && $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o ../$(BIN) ./cmd/lanreel
 
 build: server
 
