@@ -4,6 +4,8 @@
 
 **当前版本：v0.1.0（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
 
+下载：见 [Releases](https://github.com/zys747526271/lanreel/releases/tag/v0.1.0)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.1.0.md](./docs/releases/v0.1.0.md)。
+
 <p>
   <img src="./docs/screenshots/setup-admin.png" width="240" alt="首次部署：创建管理员" />
   <img src="./docs/screenshots/feed-video.png" width="240" alt="浏览页：全屏竖滑 + 视频播放" />
@@ -18,7 +20,7 @@
 - 进度条按下才跳转、按住可拖动，悬停不再误跳；收藏夹为缩略图网格，点开全屏滑动浏览
 - 图片按配置时长（默认 5 秒）自动切换，底部有停留进度提示
 - 视频支持拖拽进度、HTTP Range 断点续播，缓存头 `public, max-age=86400`
-- 「随机」与「仅收藏」两种浏览模式，一屏一媒体，切换零刷新
+- 收藏夹独立成页（缩略图网格），与随机流分离，一屏一媒体、切换零刷新
 
 **内容管控**
 - 管理员可对文件夹、单文件分别设置「可播 / 禁用 / 时间窗口（支持跨零点）」
