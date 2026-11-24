@@ -36,6 +36,12 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '收藏夹' },
     },
     {
+      path: '/history',
+      name: 'history',
+      component: () => import('@/views/HistoryView.vue'),
+      meta: { requiresAuth: true, title: '观看历史' },
+    },
+    {
       path: '/favorites/play',
       name: 'favorites-play',
       component: () => import('@/views/FavoritesPlayView.vue'),

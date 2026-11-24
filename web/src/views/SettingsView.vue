@@ -8,8 +8,8 @@ import { countAll, clearStore } from '@/lib/db'
 import { fetchPublicConfig, withToken } from '@/api/client'
 import { formatTime } from '@/lib/format'
 import { RATE_OPTIONS, prefs, resetPrefs, type PlaybackRate } from '@/lib/prefs'
-import { clearHistory, listHistory, removeHistory, type HistoryEntry } from '@/lib/history'
 import type { PublicConfig } from '@/api/types'
+import { playerReturnPath } from '@/lib/session'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -24,7 +24,7 @@ const logCount = ref(0)
 const favoriteCacheCount = ref(0)
 const config = ref<PublicConfig | null>(null)
 const hint = ref('')
-const history = ref<HistoryEntry[]>([])
+
 
 const categories = [
   { value: '', label: '全部分类' },
@@ -72,7 +72,7 @@ async function loadMeta() {
   try {
     favoriteCacheCount.value = await countAll('favorites')
     config.value = await fetchPublicConfig()
-    history.value = await listHistory(30)
+
   } catch {
     /* 忽略 */
   }
@@ -115,22 +115,6 @@ async function clearCache() {
   hint.value = '本地缓存已清空'
 }
 
-async function clearAllHistory() {
-  if (!window.confirm('确认清空观看历史？该操作仅影响本机记录。')) return
-  await clearHistory()
-  history.value = []
-  hint.value = '观看历史已清空'
-}
-
-async function dropHistory(key: string) {
-  await removeHistory(key)
-  history.value = history.value.filter((h) => h.key !== key)
-}
-
-function openHistory(entry: HistoryEntry) {
-  router.push({ path: '/play', query: { src: 'history', key: entry.key } })
-}
-
 function setRate(value: PlaybackRate) {
   prefs.defaultRate = value
 }
@@ -159,7 +143,7 @@ onMounted(async () => {
           <button
             class="rounded-full border border-white/12 p-2 transition hover:bg-white/10"
             title="返回浏览"
-            @click="router.push('/')"
+            @click="router.push(playerReturnPath())"
           >
             <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <path d="M15 18l-6-6 6-6" />
@@ -167,7 +151,7 @@ onMounted(async () => {
           </button>
           <h1 class="text-lg font-semibold">设置</h1>
         </div>
-        <button class="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-black" @click="router.push('/')">
+        <button class="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-black" @click="router.push(playerReturnPath())">
           继续浏览
         </button>
       </header>
@@ -293,56 +277,17 @@ onMounted(async () => {
         </div>
       </section>
 
-      <!-- 观看历史 -->
+      <!-- 观看历史入口 -->
       <section class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="flex items-center justify-between gap-3">
           <div>
             <h2 class="text-sm font-medium text-white/80">观看历史</h2>
-            <p class="mt-0.5 text-[11px] text-white/35">仅保存在本机，最多 100 条</p>
+            <p class="mt-0.5 text-[11px] text-white/35">本机最近观看记录，与收藏夹分开管理</p>
           </div>
-          <button
-            v-if="history.length"
-            class="text-[11px] text-white/40 hover:text-red-300"
-            @click="clearAllHistory"
-          >
-            清空
-          </button>
+          <router-link to="/history" class="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10">
+            查看历史
+          </router-link>
         </div>
-
-        <p v-if="!history.length" class="rounded-lg bg-white/[0.03] px-3 py-6 text-center text-xs text-white/35">
-          还没有观看记录
-        </p>
-        <ul v-else class="grid grid-cols-3 gap-1.5">
-          <li v-for="h in history" :key="h.key" class="group relative">
-            <button
-              class="block w-full overflow-hidden rounded-lg bg-white/5 text-left"
-              :title="h.rel_path"
-              @click="openHistory(h)"
-            >
-              <span class="block aspect-[9/14]">
-                <img
-                  :src="withToken(h.thumb_url)"
-                  class="h-full w-full object-cover"
-                  loading="lazy"
-                  alt=""
-                  @error="($event.target as HTMLImageElement).style.display = 'none'"
-                />
-              </span>
-              <span class="absolute inset-x-1 bottom-1 truncate rounded bg-black/60 px-1 py-0.5 text-[10px] text-white/80 backdrop-blur">
-                {{ h.rel_path.split('/').pop() }}
-              </span>
-            </button>
-            <button
-              class="absolute right-1 top-1 hidden rounded-full bg-black/70 p-1 text-white/80 group-hover:block"
-              title="从历史中移除"
-              @click.stop="dropHistory(h.key)"
-            >
-              <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M6 6l12 12M18 6 6 18" />
-              </svg>
-            </button>
-          </li>
-        </ul>
       </section>
 
       <!-- 运行环境 -->

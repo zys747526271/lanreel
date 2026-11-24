@@ -50,6 +50,14 @@ export const useFeedStore = defineStore('feed', () => {
     error.value = ''
   }
 
+  /** 从会话缓存恢复上一次的随机流（返回设置/后台时保持同一批视频与顺序）。 */
+  function restore(restored: typeof items.value) {
+    items.value = restored
+    loading.value = false
+    hasMore.value = true
+    error.value = ''
+  }
+
   async function setMode(next: FeedMode) {
     if (mode.value === next) return
     mode.value = next
@@ -71,5 +79,5 @@ export const useFeedStore = defineStore('feed', () => {
     items.value = items.value.filter((i) => i.key !== key)
   }
 
-  return { items, mode, loading, error, hasMore, isEmpty, loadMore, reset, setMode, patchFavorite, applyFavoriteKeys, removeKey }
+  return { items, mode, loading, error, hasMore, isEmpty, loadMore, reset, restore, setMode, patchFavorite, applyFavoriteKeys, removeKey }
 })

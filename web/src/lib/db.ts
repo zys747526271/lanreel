@@ -6,12 +6,13 @@
  *  - user_state 用户状态与配置缓存
  *  - app_logs   前端分类日志（独立 store，便于单独清理与容量控制）
  *  - history    观看历史（本地，仅记录用户自己看过的条目）
+ *  - thumbs     悬浮抽帧得到的封面帧（按 media key 缓存）
  */
 
 const DB_NAME = 'lanreel'
-const DB_VERSION = 2
+const DB_VERSION = 3
 
-export type StoreName = 'favorites' | 'user_state' | 'app_logs' | 'history'
+export type StoreName = 'favorites' | 'user_state' | 'app_logs' | 'history' | 'thumbs'
 
 let dbPromise: Promise<IDBDatabase> | null = null
 
@@ -40,6 +41,9 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('history')) {
         const store = db.createObjectStore('history', { keyPath: 'key' })
         store.createIndex('played_at', 'played_at')
+      }
+      if (!db.objectStoreNames.contains('thumbs')) {
+        db.createObjectStore('thumbs', { keyPath: 'key' })
       }
     }
     req.onsuccess = () => resolve(req.result)

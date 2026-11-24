@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { playerReturnPath } from '@/lib/session'
 
 const route = useRoute()
 const router = useRouter()
@@ -64,9 +65,9 @@ async function signOut() {
       <main class="min-w-0 flex-1">
         <header class="flex items-center justify-between border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur md:px-6">
           <div class="flex items-center gap-3">
-            <router-link to="/" class="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100">
+            <button @click="router.push(playerReturnPath())" class="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100">
               ← 返回前台
-            </router-link>
+            </button>
             <h1 class="text-base font-semibold">{{ currentTitle }}</h1>
           </div>
           <div class="flex items-center gap-2 text-xs text-slate-500">

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import ReelSlide from '@/components/reel/ReelSlide.vue'
 import { useFeedStore } from '@/stores/feed'
 import { useAuthStore } from '@/stores/auth'
@@ -9,7 +9,9 @@ import { logger } from '@/lib/logger'
 import { reasonText } from '@/lib/format'
 import { prefs } from '@/lib/prefs'
 import { recordHistory } from '@/lib/history'
+import { loadFeedSession, rememberPlayerRoute, saveFeedSession } from '@/lib/session'
 
+const route = useRoute()
 const router = useRouter()
 const feed = useFeedStore()
 const auth = useAuthStore()
@@ -22,7 +24,20 @@ const imageDuration = ref(5)
 const rate = computed(() => prefs.defaultRate)
 const toast = ref('')
 const routeLoading = ref(true)
+/** 从设置/后台返回时恢复的播放位置 */
+const positions = ref<Record<string, number>>({})
+const pendingResumeTime = ref<number | null>(null)
 let toastTimer: number | null = null
+
+type SlideInstance = InstanceType<typeof ReelSlide>
+const slideRefs = new Map<number, SlideInstance>()
+function setSlideRef(el: unknown, index: number) {
+  if (el) slideRefs.set(index, el as SlideInstance)
+  else slideRefs.delete(index)
+}
+const activeSlide = computed(() => slideRefs.get(activeIndex.value))
+const currentItem = computed(() => feed.items[activeIndex.value])
+const favoriteCount = computed(() => favorites.count)
 
 function showToast(message: string) {
   toast.value = message
@@ -46,6 +61,8 @@ function onScroll() {
   const index = Math.round(el.scrollTop / slideHeight())
   if (index !== activeIndex.value) {
     activeIndex.value = index
+    // 恢复进度只对进入时的那一条生效，切换后不再回跳。
+    pendingResumeTime.value = null
     if (index >= feed.items.length - 3) void feed.loadMore(5)
     maybeRecordHistory()
   }
@@ -71,12 +88,30 @@ function prev() {
   if (activeIndex.value > 0) scrollToIndex(activeIndex.value - 1)
 }
 
+/* ------------------------- 键盘控制 ------------------------- */
+/** 长按 ←/→ 持续快退/快进；首次按下立即响应，随按住时间加速。 */
+let seekTimer: number | null = null
+let seekElapsed = 0
+function stopSeek() {
+  if (seekTimer !== null) window.clearInterval(seekTimer)
+  seekTimer = null
+  seekElapsed = 0
+}
+function startSeek(dir: 1 | -1) {
+  stopSeek()
+  activeSlide.value?.seekBy(dir * 3)
+  seekTimer = window.setInterval(() => {
+    seekElapsed += 120
+    const step = seekElapsed > 1200 ? 8 : seekElapsed > 600 ? 5 : 3
+    activeSlide.value?.seekBy(dir * step)
+  }, 120)
+}
+
 function onKeydown(event: KeyboardEvent) {
-  if (['INPUT', 'TEXTAREA'].includes((event.target as HTMLElement)?.tagName)) return
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName)) return
   switch (event.key) {
     case 'ArrowDown':
     case 'PageDown':
-    case ' ':
       event.preventDefault()
       next()
       break
@@ -85,6 +120,19 @@ function onKeydown(event: KeyboardEvent) {
       event.preventDefault()
       prev()
       break
+    case 'ArrowRight':
+      event.preventDefault()
+      if (!event.repeat) startSeek(1)
+      break
+    case 'ArrowLeft':
+      event.preventDefault()
+      if (!event.repeat) startSeek(-1)
+      break
+    case ' ':
+      // 空格 = 暂停/继续（不再切换视频）
+      event.preventDefault()
+      activeSlide.value?.togglePlay()
+      break
     case 'm':
     case 'M':
       muted.value = !muted.value
@@ -92,6 +140,30 @@ function onKeydown(event: KeyboardEvent) {
     default:
       break
   }
+}
+
+function onKeyup(event: KeyboardEvent) {
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') stopSeek()
+}
+
+function onProgress(payload: { key: string; current: number }) {
+  positions.value[payload.key] = payload.current
+}
+
+function saveSession() {
+  if (routeLoading.value || !feed.items.length) return
+  const item = feed.items[activeIndex.value]
+  if (item) {
+    const t = activeSlide.value?.getCurrentTime()
+    if (t != null) positions.value[item.key] = t
+  }
+  const sessionKey = auth.user ? `u${auth.user.id}` : 'guest'
+  saveFeedSession({
+    sessionKey,
+    items: feed.items,
+    activeIndex: activeIndex.value,
+    positions: { ...positions.value },
+  })
 }
 
 async function onToggleFavorite(key: string) {
@@ -116,17 +188,19 @@ function onBlocked(reason: string) {
   showToast(reasonText(reason))
 }
 
-function openFavorites() {
+function openList(path: string) {
   if (!auth.isLoggedIn) {
-    router.push({ path: '/login', query: { redirect: '/favorites' } })
+    router.push({ path: '/login', query: { redirect: path } })
     return
   }
-  router.push('/favorites')
+  router.push(path)
 }
 
 async function refresh() {
   feed.reset()
   activeIndex.value = 0
+  positions.value = {}
+  pendingResumeTime.value = null
   await feed.loadMore(8)
   await nextTick()
   scrollToIndex(0, false)
@@ -150,44 +224,59 @@ async function signOut() {
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
-  // 登录身份变化（游客↔登录、换账号）时重建列表，避免残留上一身份的条目
+  window.addEventListener('keyup', onKeyup)
+  window.addEventListener('blur', stopSeek)
+  window.addEventListener('pagehide', saveSession)
+  rememberPlayerRoute(route.fullPath)
+
   const sessionKey = auth.user ? `u${auth.user.id}` : 'guest'
-  if (sessionStorage.getItem('lanreel.feed.session') !== sessionKey) {
+  const saved = loadFeedSession(sessionKey)
+  if (saved) {
+    feed.restore(saved.items)
+    activeIndex.value = Math.min(saved.activeIndex, saved.items.length - 1)
+    positions.value = { ...saved.positions }
+    pendingResumeTime.value = saved.positions[saved.items[activeIndex.value]?.key ?? ''] ?? null
+  } else if (sessionStorage.getItem('lanreel.feed.session') !== sessionKey) {
     feed.reset()
     sessionStorage.setItem('lanreel.feed.session', sessionKey)
   }
+
   const tasks: Promise<unknown>[] = [loadConfig()]
   if (auth.isLoggedIn) tasks.push(favorites.load())
   await Promise.all(tasks)
-  await feed.loadMore(8)
+  if (!saved) await feed.loadMore(8)
   if (auth.isLoggedIn) feed.applyFavoriteKeys(favorites.keys)
   routeLoading.value = false
+  await nextTick()
+  scrollToIndex(activeIndex.value, false)
   maybeRecordHistory()
-  logger.info('app', 'feed', '进入浏览页', { guest: !auth.isLoggedIn })
+  logger.info('app', 'feed', '进入浏览页', {
+    guest: !auth.isLoggedIn,
+    restored: !!saved,
+    index: activeIndex.value,
+  })
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keyup', onKeyup)
+  window.removeEventListener('blur', stopSeek)
+  window.removeEventListener('pagehide', saveSession)
+  stopSeek()
+  saveSession()
   if (toastTimer) window.clearTimeout(toastTimer)
   if (historyTimer) window.clearTimeout(historyTimer)
 })
-
-watch(
-  () => favorites.keys,
-  (keys) => feed.applyFavoriteKeys(keys),
-  { deep: true },
-)
-
-const currentItem = computed(() => feed.items[activeIndex.value])
-const favoriteCount = computed(() => favorites.count)
 </script>
 
 <template>
   <div class="fixed inset-0 flex flex-col bg-black text-white">
-    <!-- 顶部栏 -->
-    <header class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between p-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
-      <div class="pointer-events-auto flex items-center gap-2">
-        <span class="select-none text-lg font-semibold tracking-tight drop-shadow">LanReel</span>
+    <!-- 顶部栏：加大触控区域，移动端常显 -->
+    <header
+      class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-3 pt-[max(0.75rem,env(safe-area-inset-top))]"
+    >
+      <div class="pointer-events-auto flex min-w-0 items-center gap-1.5">
+        <span class="hidden select-none text-lg font-semibold tracking-tight drop-shadow sm:inline">LanReel</span>
         <span
           v-if="favorites.offline"
           class="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-200"
@@ -197,43 +286,43 @@ const favoriteCount = computed(() => favorites.count)
         </span>
         <span
           v-if="!auth.isLoggedIn"
-          class="rounded-full border border-white/20 bg-black/40 px-2 py-0.5 text-[10px] text-white/70 backdrop-blur"
+          class="hidden rounded-full border border-white/20 bg-black/50 px-2 py-0.5 text-[10px] text-white/70 backdrop-blur sm:inline"
         >
           游客
         </span>
         <button
-          class="rounded-full border border-white/15 bg-black/40 px-3 py-1 text-xs text-white/80 backdrop-blur transition hover:bg-black/60"
-          @click="openFavorites"
+          class="flex h-9 items-center gap-1 rounded-full border border-white/20 bg-black/55 px-3 text-xs text-white/90 backdrop-blur transition hover:bg-black/75 active:scale-95"
+          @click="openList('/favorites')"
         >
-          收藏夹
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <path d="M12 20s-7-4.4-7-9.2A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7 3.2C19 15.6 12 20 12 20Z" />
+          </svg>
+          收藏
+        </button>
+        <button
+          class="flex h-9 items-center gap-1 rounded-full border border-white/20 bg-black/55 px-3 text-xs text-white/90 backdrop-blur transition hover:bg-black/75 active:scale-95"
+          @click="openList('/history')"
+        >
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+          历史
         </button>
       </div>
-      <div class="pointer-events-auto flex items-center gap-1.5">
-        <button
-          class="rounded-full border border-white/15 bg-black/40 p-2 backdrop-blur transition hover:bg-black/60"
-          :title="muted ? '开启声音' : '静音'"
-          @click="muted = !muted"
-        >
-          <svg v-if="muted" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-            <path d="m16 9 5 6m0-6-5 6" />
-          </svg>
-          <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-            <path d="M15.5 8.5a5 5 0 0 1 0 7M18 6a8.5 8.5 0 0 1 0 12" />
-          </svg>
-        </button>
+      <div class="pointer-events-auto flex shrink-0 items-center gap-1.5">
         <router-link
           v-if="auth.isAdmin"
           to="/admin"
-          class="rounded-full border border-white/15 bg-black/40 px-3 py-2 text-xs backdrop-blur transition hover:bg-black/60"
+          class="flex h-9 items-center rounded-full border border-white/20 bg-black/55 px-3 text-xs text-white/90 backdrop-blur transition hover:bg-black/75"
         >
           后台
         </router-link>
         <router-link
           to="/settings"
-          class="rounded-full border border-white/15 bg-black/40 p-2 backdrop-blur transition hover:bg-black/60"
-          title="设置与日志"
+          class="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/55 backdrop-blur transition hover:bg-black/75"
+          title="设置"
+          aria-label="设置"
         >
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <circle cx="12" cy="12" r="3" />
@@ -243,14 +332,15 @@ const favoriteCount = computed(() => favorites.count)
         <router-link
           v-if="!auth.isLoggedIn"
           to="/login"
-          class="rounded-full bg-white px-3 py-2 text-xs font-medium text-black transition hover:bg-white/90"
+          class="flex h-9 items-center rounded-full bg-white px-3 text-xs font-medium text-black transition hover:bg-white/90"
         >
           登录
         </router-link>
         <button
           v-else
-          class="rounded-full border border-white/15 bg-black/40 p-2 backdrop-blur transition hover:bg-black/60"
+          class="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/55 backdrop-blur transition hover:bg-black/75"
           title="退出登录"
+          aria-label="退出登录"
           @click="signOut"
         >
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -268,20 +358,25 @@ const favoriteCount = computed(() => favorites.count)
     >
       <section
         v-for="(item, index) in feed.items"
-        :key="item.uid"
+        :key="item.uid ?? item.key"
         class="relative h-full w-full snap-start snap-always"
       >
         <ReelSlide
+          :ref="(el) => setSlideRef(el, index)"
           :item="item"
           :active="index === activeIndex"
           :preload="Math.abs(index - activeIndex) <= 1"
           :image-duration="imageDuration"
           :muted="muted"
           :rate="rate"
+          :resume-time="index === activeIndex ? pendingResumeTime : null"
           @autoplay-muted="showToast('已静音播放，点击画面开启声音')"
           @advance="next"
+          @retreat="prev"
           @blocked="onBlocked"
           @toggle-favorite="onToggleFavorite"
+          @toggle-mute="muted = !muted"
+          @progress="onProgress"
           @player-error="(p) => showToast(p.message)"
         />
       </section>
@@ -328,19 +423,27 @@ const favoriteCount = computed(() => favorites.count)
       </div>
     </div>
 
-    <!-- 右侧操作栏 -->
+    <!-- 右侧操作栏：上下切换 / 收藏 / 信息（放在控制条上方，避免遮挡） -->
     <div
       v-if="currentItem && !feed.isEmpty"
-      class="absolute bottom-44 right-3 z-30 flex flex-col items-center gap-5"
+      class="absolute bottom-[7.5rem] right-3 z-30 flex flex-col items-center gap-3.5"
     >
+      <button class="flex flex-col items-center gap-0.5" title="上一个（↑）" @click="prev">
+        <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70 active:scale-90">
+          <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="m6 15 6-6 6 6" />
+          </svg>
+        </span>
+        <span class="text-[10px] text-white/65">上一个</span>
+      </button>
       <button
         v-if="auth.isLoggedIn"
-        class="group flex flex-col items-center gap-1"
+        class="group flex flex-col items-center gap-0.5"
         data-action="favorite"
         @click="onToggleFavorite(currentItem.key)"
       >
         <span
-          class="flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-black/40 backdrop-blur transition group-active:scale-90"
+          class="flex h-12 w-12 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition active:scale-90"
         >
           <svg
             class="h-6 w-6 transition"
@@ -353,39 +456,40 @@ const favoriteCount = computed(() => favorites.count)
             <path d="M12 20s-7-4.4-7-9.2A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7 3.2C19 15.6 12 20 12 20Z" />
           </svg>
         </span>
-        <span class="text-[11px] text-white/70" data-role="favorite-count">{{ favoriteCount }}</span>
+        <span class="text-[10px] text-white/65" data-role="favorite-count">{{ favoriteCount }}</span>
       </button>
       <router-link
         :to="auth.isLoggedIn ? '/settings' : '/login'"
-        class="flex flex-col items-center gap-1"
+        class="flex flex-col items-center gap-0.5"
+        title="信息 / 设置"
       >
-        <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-black/40 backdrop-blur">
+        <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70">
           <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
             <circle cx="12" cy="12" r="9" />
             <path d="M12 11v5m0-8.2v.1" />
           </svg>
         </span>
-        <span class="text-[11px] text-white/60">信息</span>
+        <span class="text-[10px] text-white/65">信息</span>
       </router-link>
-      <button class="flex flex-col items-center gap-1" @click="next">
-        <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-black/40 backdrop-blur">
+      <button class="flex flex-col items-center gap-0.5" title="下一个（↓）" @click="next">
+        <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70 active:scale-90">
           <svg class="h-5 w-5 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <path d="m6 9 6 6 6-6" />
           </svg>
         </span>
-        <span class="text-[11px] text-white/60">下一个</span>
+        <span class="text-[10px] text-white/65">下一个</span>
       </button>
     </div>
 
-    <!-- 信息条 -->
+    <!-- 信息条：抬高到控制条上方 -->
     <div
       v-if="currentItem"
-      class="pointer-events-none absolute bottom-24 left-4 z-20 max-w-[70%] space-y-1"
+      class="pointer-events-none absolute bottom-[6.2rem] left-4 z-20 max-w-[60%] space-y-0.5"
     >
-      <p class="truncate text-sm font-medium text-white/95">
+      <p class="truncate text-sm font-medium text-white/95 drop-shadow">
         {{ currentItem.rel_path.split('/').pop() }}
       </p>
-      <p class="truncate text-[11px] text-white/55">
+      <p class="truncate text-[11px] text-white/65 drop-shadow">
         {{ currentItem.folder || '根目录' }} · {{ currentItem.media_type === 'video' ? '视频' : '图片' }}
       </p>
       <p v-if="!currentItem.playable" class="text-[11px] text-amber-300/90">
@@ -397,7 +501,7 @@ const favoriteCount = computed(() => favorites.count)
     <transition name="toast">
       <div
         v-if="toast"
-        class="pointer-events-none absolute left-1/2 top-20 z-40 -translate-x-1/2 rounded-full bg-black/75 px-4 py-2 text-sm text-white shadow-lg backdrop-blur"
+        class="pointer-events-none absolute left-1/2 top-20 z-40 -translate-x-1/2 rounded-full bg-black/80 px-4 py-2 text-sm text-white shadow-lg backdrop-blur"
       >
         {{ toast }}
       </div>
