@@ -5,7 +5,9 @@ import type {
   FileView,
   FolderPolicyView,
   LoggingSettings,
+  DirListing,
   MediaItem,
+  MediaSettings,
   Paged,
   ScheduleType,
   SystemLogEntry,
@@ -19,6 +21,25 @@ export function fetchStats() {
 
 export function triggerScan() {
   return request<{ data: { media_total: number } }>('/admin/scan', { method: 'POST' })
+}
+
+// ---------- 媒体目录 ----------
+export function getMediaSettings() {
+  return request<{ data: MediaSettings }>('/admin/settings/media')
+}
+
+export function setMediaRoots(roots: string[]) {
+  return request<{ data: MediaSettings }>('/admin/settings/media', { method: 'PUT', body: { roots } })
+}
+
+export function resetMediaRoots() {
+  return request<{ data: MediaSettings }>('/admin/settings/media', { method: 'DELETE' })
+}
+
+/** 目录浏览器：path 为空时列出根（Windows 为盘符）。 */
+export function listDirs(path = '') {
+  const q = path ? `?path=${encodeURIComponent(path)}` : ''
+  return request<{ data: DirListing }>(`/admin/fs/dirs${q}`)
 }
 
 // ---------- 文件夹策略 ----------

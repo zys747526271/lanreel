@@ -105,6 +105,8 @@ func main() {
 	mediaSvc := service.NewMediaService(scanner, evaluator, cfg, logger)
 	favSvc := service.NewFavoriteService(store, mediaSvc, logger)
 	adminSvc := service.NewAdminService(store, mediaSvc, favSvc, evaluator, authSvc, cfg, logger, logStore)
+	// 后台可覆盖媒体目录（CR-003）：启动时优先使用已保存的设置。
+	scanner.SetRoots(adminSvc.EffectiveMediaRoots(context.Background()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

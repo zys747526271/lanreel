@@ -38,6 +38,7 @@
 **部署与资源**
 - 单二进制（26MB，含前端），`CGO_ENABLED=0` 可交叉编译
 - 首次部署在浏览器内创建管理员，之后每次启动直接进主页（无浏览器可用 `ADMIN_INIT_PASSWORD` 预置）
+- 媒体目录可在后台「媒体目录」增删（内置目录浏览器），保存后立即热重扫，无需改配置或重启
 - 不做服务端转码、不缓存媒体本体；空闲内存实测 ~28MB
 - `GOMEMLIMIT` / `GOMAXPROCS` 通过环境变量注入，便于与前台游戏共存
 
@@ -47,7 +48,7 @@
 # 1) 构建（Go 1.25+、Node 20+）
 ./scripts/build.sh          # Windows 可用 scripts/build.ps1 或 make build
 
-# 2) 配置：把 media.roots 指向你的媒体目录
+# 2) 配置：先填 media.roots 指向你的媒体目录（也可启动后在后台「媒体目录」里改）
 cp server/configs/config.example.yaml config.yaml
 
 # 3) 启动（Windows 为 dist\lanreel.exe）
@@ -149,7 +150,7 @@ cd web && npx vue-tsc --noEmit
 
 | 配置 | 说明 | 默认 |
 |------|------|------|
-| `media.roots` | 媒体根目录（可多个） | `./media` |
+| `media.roots` | 媒体根目录（可多个）；后台「媒体目录」保存后会覆盖此项 | `./media` |
 | `media.scan_interval_seconds` | 定时重扫间隔，0 表示仅启动扫描 | `60` |
 | `media.image_display_seconds` | 图片停留秒数 | `5` |
 | `app.timezone` | 时区（影响时间窗口与日志时间） | `Asia/Shanghai` |
@@ -175,7 +176,7 @@ cd web && npx vue-tsc --noEmit
 | 收藏 | `GET /favorites`、`POST /favorites`、`DELETE /favorites/:key` |
 | 日志 | `POST /logs/client`（前端日志上报，默认关闭） |
 
-### 管理接口（需 `role=admin`，共 22 个）
+### 管理接口（需 `role=admin`，共 26 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -198,6 +199,10 @@ cd web && npx vue-tsc --noEmit
 | GET | `/admin/logs` | 运行日志（分类、级别、关键字、请求 ID、时间、分页） |
 | GET | `/admin/logs/:id` | 单条日志详情（含脱敏上下文） |
 | POST | `/admin/logs/purge` | 按保留策略清理运行日志 |
+| GET | `/admin/settings/media` | 读取媒体目录、来源与扫描状态 |
+| PUT | `/admin/settings/media` | 保存媒体目录并触发后台重扫（目录须存在） |
+| DELETE | `/admin/settings/media` | 清除后台设置，回落到配置文件 `media.roots` |
+| GET | `/admin/fs/dirs?path=` | 目录浏览器（`path` 为空列根/盘符，仅返回子目录） |
 | GET | `/admin/settings/logging` | 读取日志配置 |
 | PUT | `/admin/settings/logging` | 更新保留天数、最大条数、级别、上报开关 |
 | PUT | `/admin/settings/registration` | 开关普通用户注册 |

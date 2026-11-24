@@ -143,6 +143,32 @@ export interface AdminStats {
   logging: LoggingSettings
 }
 
+/** 媒体目录设置（后台可热更新，CR-003）。 */
+export interface MediaSettings {
+  roots: string[]
+  /** database=后台设置优先，config=使用配置文件 media.roots */
+  source: 'database' | 'config'
+  config_roots: string[]
+  scan_interval_seconds: number
+  image_display_seconds: number
+  scanning: boolean
+  media_total: number
+  scan: ScanSummary
+}
+
+/** 目录浏览器条目。 */
+export interface DirEntry {
+  name: string
+  path: string
+}
+
+export interface DirListing {
+  current: string
+  parent: string
+  entries: DirEntry[]
+  separator: string
+}
+
 export interface LoggingSettings {
   retention_days: number
   max_entries: number

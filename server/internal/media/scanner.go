@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -66,13 +67,61 @@ type Scanner struct {
 	summary  ScanSummary
 	lastErr  error
 	scanning atomic.Bool
+
+	// rootsMu 保护可变媒体根目录（后台可热更新，见 CR-003）。
+	rootsMu sync.RWMutex
+	roots   []string
 }
 
 // NewScanner 构造扫描器。
 func NewScanner(cfg *config.Config, store MetaStore, logger *logging.Logger) *Scanner {
-	s := &Scanner{cfg: cfg, meta: store, log: logger}
+	s := &Scanner{cfg: cfg, meta: store, log: logger, roots: append([]string(nil), cfg.Media.Roots...)}
 	s.snap.Store(&Snapshot{ByKey: map[string]*Item{}})
 	return s
+}
+
+// Roots 返回当前生效的媒体根目录快照。
+func (s *Scanner) Roots() []string {
+	s.rootsMu.RLock()
+	defer s.rootsMu.RUnlock()
+	return append([]string(nil), s.roots...)
+}
+
+// SetRoots 热更新媒体根目录（调用方负责随后触发一次扫描）。
+func (s *Scanner) SetRoots(roots []string) {
+	clean := make([]string, 0, len(roots))
+	seen := map[string]bool{}
+	for _, r := range roots {
+		out, err := NormalizeRoot(r)
+		if err != nil || seen[out] {
+			continue
+		}
+		seen[out] = true
+		clean = append(clean, out)
+	}
+	s.rootsMu.Lock()
+	s.roots = clean
+	s.rootsMu.Unlock()
+}
+
+// NormalizeRoot 校验并归一化一个媒体根目录：必须是存在的绝对路径目录。
+func NormalizeRoot(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", errors.New("目录不能为空")
+	}
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", fmt.Errorf("解析路径失败: %w", err)
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return "", errors.New("目录不存在或不可访问")
+	}
+	if !st.IsDir() {
+		return "", errors.New("不是目录")
+	}
+	return abs, nil
 }
 
 // Snapshot 返回当前快照。
@@ -83,6 +132,20 @@ func (s *Scanner) Summary() ScanSummary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.summary
+}
+
+// Scanning 是否正在扫描（后台用于轮询进度）。
+func (s *Scanner) Scanning() bool { return s.scanning.Load() }
+
+// ScanAsync 在后台触发一次扫描，不阻塞请求方。
+func (s *Scanner) ScanAsync() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if _, _, err := s.Scan(ctx); err != nil {
+			s.log.Warn(logging.CatScan, "media.scanner", "后台扫描未执行", map[string]any{"error": err.Error()})
+		}
+	}()
 }
 
 // LastError 返回最近一次扫描错误。
@@ -125,9 +188,10 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 	defer s.scanning.Store(false)
 
 	started := time.Now()
-	summary := ScanSummary{StartedAt: started, Roots: len(s.cfg.Media.Roots)}
+	roots := s.Roots()
+	summary := ScanSummary{StartedAt: started, Roots: len(roots)}
 	s.log.Info(logging.CatScan, "media.scanner", "开始扫描媒体目录", map[string]any{
-		"roots": len(s.cfg.Media.Roots),
+		"roots": len(roots), "paths": roots,
 	})
 
 	cached := map[string]models.MediaMeta{}
@@ -143,7 +207,7 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 	seen := map[string]bool{}
 	var metas []models.MediaMeta
 
-	for idx, root := range s.cfg.Media.Roots {
+	for idx, root := range roots {
 		root := root
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -195,13 +259,13 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 			seen[key] = true
 
 			item := &Item{
-				Key:      key,
-				Source:   s.cfg.App.SourceID,
-				RelPath:  rel,
-				AbsPath:  p,
-				Type:     kind,
-				Size:     info.Size(),
-				ModTime:  info.ModTime(),
+				Key:     key,
+				Source:  s.cfg.App.SourceID,
+				RelPath: rel,
+				AbsPath: p,
+				Type:    kind,
+				Size:    info.Size(),
+				ModTime: info.ModTime(),
 			}
 			if kind == models.MediaVideo {
 				if m, ok := cached[key]; ok && m.MediaType == models.MediaVideo {

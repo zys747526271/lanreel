@@ -114,6 +114,11 @@ func (h *Handlers) Engine() *gin.Engine {
 			admin.GET("/logs/:id", h.handleAdminLogDetail)
 			admin.POST("/logs/purge", h.handleAdminPurgeLogs)
 
+			admin.GET("/settings/media", h.handleAdminMediaSettings)
+			admin.PUT("/settings/media", h.handleAdminSetMediaRoots)
+			admin.DELETE("/settings/media", h.handleAdminResetMediaRoots)
+			admin.GET("/fs/dirs", h.handleAdminFSDirs)
+
 			admin.GET("/settings/logging", h.handleGetLoggingSettings)
 			admin.PUT("/settings/logging", h.handleSetLoggingSettings)
 			admin.PUT("/settings/registration", h.handleSetRegistration)

@@ -71,26 +71,26 @@ func (s *AdminService) audit(ctx context.Context, admin *models.User, targetType
 
 // StatsView 后台概览。
 type StatsView struct {
-	Users          int                `json:"users"`
-	Admins         int                `json:"admins"`
-	Favorites      int                `json:"favorites"`
-	MediaTotal     int                `json:"media_total"`
-	Videos         int                `json:"videos"`
-	Images         int                `json:"images"`
-	FolderPolicies int                `json:"folder_policies"`
-	FileOverrides  int                `json:"file_overrides"`
-	Scan           media.ScanSummary  `json:"scan"`
-	LogCounts      map[string]int     `json:"log_counts"`
-	Registration   bool               `json:"registration_open"`
-	Logging        LoggingSettings    `json:"logging"`
+	Users          int               `json:"users"`
+	Admins         int               `json:"admins"`
+	Favorites      int               `json:"favorites"`
+	MediaTotal     int               `json:"media_total"`
+	Videos         int               `json:"videos"`
+	Images         int               `json:"images"`
+	FolderPolicies int               `json:"folder_policies"`
+	FileOverrides  int               `json:"file_overrides"`
+	Scan           media.ScanSummary `json:"scan"`
+	LogCounts      map[string]int    `json:"log_counts"`
+	Registration   bool              `json:"registration_open"`
+	Logging        LoggingSettings   `json:"logging"`
 }
 
 // LoggingSettings 日志配置（可热更新）。
 type LoggingSettings struct {
-	RetentionDays int  `json:"retention_days"`
-	MaxEntries    int  `json:"max_entries"`
-	Level         string `json:"level"`
-	FrontendUpload bool `json:"frontend_upload_enabled"`
+	RetentionDays  int    `json:"retention_days"`
+	MaxEntries     int    `json:"max_entries"`
+	Level          string `json:"level"`
+	FrontendUpload bool   `json:"frontend_upload_enabled"`
 }
 
 // Stats 汇总概览数据。
@@ -306,14 +306,14 @@ func (s *AdminService) CleanUserFavorites(ctx context.Context, admin *models.Use
 
 // FolderPolicyView 文件夹策略视图（含扫描统计）。
 type FolderPolicyView struct {
-	FolderPath   string    `json:"folder_path"`
-	Total        int       `json:"total"`
-	Videos       int       `json:"videos"`
-	Images       int       `json:"images"`
-	Enabled      bool      `json:"enabled"`
-	ScheduleType string    `json:"schedule_type"`
-	TimeStart    string    `json:"time_start"`
-	TimeEnd      string    `json:"time_end"`
+	FolderPath    string     `json:"folder_path"`
+	Total         int        `json:"total"`
+	Videos        int        `json:"videos"`
+	Images        int        `json:"images"`
+	Enabled       bool       `json:"enabled"`
+	ScheduleType  string     `json:"schedule_type"`
+	TimeStart     string     `json:"time_start"`
+	TimeEnd       string     `json:"time_end"`
 	Configured    bool       `json:"configured"`
 	Inherited     bool       `json:"inherited"`
 	InheritedFrom string     `json:"inherited_from"`
@@ -675,3 +675,122 @@ func (s *MediaService) scannerSummary() media.ScanSummary {
 
 // GetStats 便捷方法（供 API 层调用）。
 func (s *AdminService) GetStats(ctx context.Context) (StatsView, error) { return s.Stats(ctx) }
+
+// ---------- 媒体目录（CR-003：后台可配置） ----------
+
+// SettingMediaRoots 媒体根目录设置键（JSON 数组；空串表示回落到配置文件）。
+const SettingMediaRoots = "media_roots"
+
+// MediaSettingsView 媒体目录设置与扫描状态。
+type MediaSettingsView struct {
+	Roots        []string          `json:"roots"`
+	Source       string            `json:"source"` // database=后台设置，config=配置文件
+	ConfigRoots  []string          `json:"config_roots"`
+	ScanInterval int               `json:"scan_interval_seconds"`
+	ImageSeconds int               `json:"image_display_seconds"`
+	Scanning     bool              `json:"scanning"`
+	MediaTotal   int               `json:"media_total"`
+	Scan         media.ScanSummary `json:"scan"`
+}
+
+// EffectiveMediaRoots 返回当前生效的媒体目录：后台设置优先，缺失时用配置文件。
+func (s *AdminService) EffectiveMediaRoots(ctx context.Context) []string {
+	raw := s.store.GetSetting(ctx, SettingMediaRoots, "")
+	if raw != "" {
+		var stored []string
+		if err := json.Unmarshal([]byte(raw), &stored); err == nil {
+			clean := make([]string, 0, len(stored))
+			for _, p := range stored {
+				if out, err := media.NormalizeRoot(p); err == nil {
+					clean = append(clean, out)
+				}
+			}
+			if len(clean) > 0 {
+				return clean
+			}
+		}
+	}
+	out := make([]string, 0, len(s.cfg.Media.Roots))
+	for _, p := range s.cfg.Media.Roots {
+		out = append(out, p)
+	}
+	return out
+}
+
+// MediaSettings 读取媒体目录设置。
+func (s *AdminService) MediaSettings(ctx context.Context) MediaSettingsView {
+	roots := s.EffectiveMediaRoots(ctx)
+	source := "config"
+	if s.store.GetSetting(ctx, SettingMediaRoots, "") != "" {
+		source = "database"
+	}
+	return MediaSettingsView{
+		Roots:        roots,
+		Source:       source,
+		ConfigRoots:  append([]string(nil), s.cfg.Media.Roots...),
+		ScanInterval: s.cfg.Media.ScanIntervalSeconds,
+		ImageSeconds: s.cfg.Media.ImageDisplaySeconds,
+		Scanning:     s.media.Scanning(),
+		MediaTotal:   len(s.media.Snapshot().Items),
+		Scan:         s.media.ScanSummary(),
+	}
+}
+
+// UpdateMediaRoots 保存媒体目录并触发后台重扫（F-06 的运行时扩展）。
+// 目录必须是存在的绝对路径；更换目录会重新计算 video_key，旧收藏可能失效。
+func (s *AdminService) UpdateMediaRoots(ctx context.Context, admin *models.User, roots []string) (MediaSettingsView, error) {
+	if len(roots) == 0 {
+		return MediaSettingsView{}, fmt.Errorf("%w: 至少保留一个媒体目录", ErrValidation)
+	}
+	if len(roots) > 16 {
+		return MediaSettingsView{}, fmt.Errorf("%w: 最多配置 16 个媒体目录", ErrValidation)
+	}
+	clean := make([]string, 0, len(roots))
+	seen := map[string]bool{}
+	for _, p := range roots {
+		out, err := media.NormalizeRoot(p)
+		if err != nil {
+			return MediaSettingsView{}, fmt.Errorf("%w: %s（%v）", ErrValidation, strings.TrimSpace(p), err)
+		}
+		if seen[out] {
+			continue
+		}
+		seen[out] = true
+		clean = append(clean, out)
+	}
+	if len(clean) == 0 {
+		return MediaSettingsView{}, fmt.Errorf("%w: 至少保留一个媒体目录", ErrValidation)
+	}
+
+	before := s.MediaSettings(ctx)
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return MediaSettingsView{}, err
+	}
+	if err := s.store.SetSetting(ctx, SettingMediaRoots, string(raw)); err != nil {
+		return MediaSettingsView{}, err
+	}
+	s.media.Scanner().SetRoots(clean)
+	s.media.Scanner().ScanAsync()
+	s.audit(ctx, admin, models.AuditTargetSetting, SettingMediaRoots, "更新媒体目录", before.Roots, clean)
+
+	view := s.MediaSettings(ctx)
+	view.Scanning = true
+	return view, nil
+}
+
+// ResetMediaRoots 清除后台设置，回落到配置文件中的 media.roots。
+func (s *AdminService) ResetMediaRoots(ctx context.Context, admin *models.User) (MediaSettingsView, error) {
+	before := s.MediaSettings(ctx)
+	if err := s.store.SetSetting(ctx, SettingMediaRoots, ""); err != nil {
+		return MediaSettingsView{}, err
+	}
+	roots := append([]string(nil), s.cfg.Media.Roots...)
+	s.media.Scanner().SetRoots(roots)
+	s.media.Scanner().ScanAsync()
+	s.audit(ctx, admin, models.AuditTargetSetting, SettingMediaRoots, "恢复媒体目录为配置文件", before.Roots, roots)
+
+	view := s.MediaSettings(ctx)
+	view.Scanning = true
+	return view, nil
+}

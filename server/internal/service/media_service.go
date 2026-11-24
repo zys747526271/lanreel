@@ -50,6 +50,15 @@ func (s *MediaService) Get(key string) (*media.Item, bool) {
 // Snapshot 返回扫描快照。
 func (s *MediaService) Snapshot() *media.Snapshot { return s.scanner.Snapshot() }
 
+// ScanSummary 返回最近一次扫描统计。
+func (s *MediaService) ScanSummary() media.ScanSummary { return s.scanner.Summary() }
+
+// Scanning 是否正在扫描。
+func (s *MediaService) Scanning() bool { return s.scanner.Scanning() }
+
+// Scanner 暴露扫描器（后台媒体目录设置需要热更新根目录）。
+func (s *MediaService) Scanner() *media.Scanner { return s.scanner }
+
 // BuildView 组装带可见性与收藏状态的视图。
 func (s *MediaService) BuildView(ctx context.Context, u *models.User, item *media.Item, favorited map[string]bool) MediaView {
 	d := s.evaluator.Evaluate(ctx, item, u.IsAdmin(), time.Now())

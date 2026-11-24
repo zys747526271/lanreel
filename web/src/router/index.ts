@@ -54,6 +54,12 @@ const router = createRouter({
           meta: { title: '概览' },
         },
         {
+          path: 'media',
+          name: 'admin-media',
+          component: () => import('@/views/admin/MediaSourcesView.vue'),
+          meta: { title: '媒体目录' },
+        },
+        {
           path: 'folders',
           name: 'admin-folders',
           component: () => import('@/views/admin/FoldersView.vue'),

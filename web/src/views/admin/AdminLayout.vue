@@ -9,6 +9,7 @@ const auth = useAuthStore()
 
 const menus = [
   { path: '/admin/dashboard', label: '概览', icon: 'M4 13h7V4H4v9Zm0 7h7v-5H4v5Zm9 0h7V11h-7v9Zm0-16v5h7V4h-7Z' },
+  { path: '/admin/media', label: '媒体目录', icon: 'M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2' },
   { path: '/admin/folders', label: '文件夹策略', icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z' },
   { path: '/admin/files', label: '文件策略', icon: 'M6 3h8l4 4v14H6V3Zm8 0v4h4' },
   { path: '/admin/users', label: '用户管理', icon: 'M16 20v-1.5A3.5 3.5 0 0 0 12.5 15h-5A3.5 3.5 0 0 0 4 18.5V20M10 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7 9v-1.6a3.4 3.4 0 0 0-2-3.1M16 4.2a3.5 3.5 0 0 1 0 6.6' },
