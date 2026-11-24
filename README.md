@@ -193,7 +193,7 @@ cd web && npx vue-tsc --noEmit
 | 初始化 | `GET /setup/status`、`POST /setup/admin`（仅在未初始化时生效，创建第一个管理员） |
 | 公开 | `GET /health`、`GET /config/public`、`POST /auth/register`、`POST /auth/login` |
 | 认证 | `POST /auth/refresh`、`POST /auth/logout`、`GET /auth/me` |
-| 媒体 | `GET /media/random?limit=&exclude=&mode=`、`GET /media/:key/stream`、`GET /media/:key/thumb`（均支持游客，带失效令牌返回 401） |
+| 媒体 | `GET /media/random?limit=&exclude=&mode=`、`POST /media/status`（批量刷新条目实时权限，v0.2.1 新增）、`GET /media/:key/stream`、`GET /media/:key/thumb`（均支持游客，带失效令牌返回 401） |
 | 收藏 | `GET /favorites`、`POST /favorites`、`DELETE /favorites/:key` |
 | 日志 | `POST /logs/client`（前端日志上报，默认关闭） |
 
