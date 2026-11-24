@@ -18,7 +18,6 @@ import (
 	"github.com/zys747526271/lanreel/server/internal/media"
 	"github.com/zys747526271/lanreel/server/internal/repository"
 	"github.com/zys747526271/lanreel/server/internal/service"
-	"github.com/zys747526271/lanreel/server/internal/thumb"
 	"github.com/zys747526271/lanreel/server/internal/webui"
 )
 
@@ -33,7 +32,7 @@ type Handlers struct {
 	store     *repository.Store
 	log       *logging.Logger
 	logStore  *logging.SQLiteStore
-	thumbs    *thumb.Generator
+	watch     *service.WatchService
 	version   string
 	startedAt time.Time
 }
@@ -42,11 +41,11 @@ type Handlers struct {
 func NewHandlers(cfg *config.Config, authSvc *service.AuthService, mediaSvc *service.MediaService,
 	fav *service.FavoriteService, adminSvc *service.AdminService, scanner *media.Scanner,
 	store *repository.Store, logger *logging.Logger, logStore *logging.SQLiteStore,
-	thumbs *thumb.Generator, version string) *Handlers {
+	watch *service.WatchService, version string) *Handlers {
 	return &Handlers{
 		cfg: cfg, auth: authSvc, media: mediaSvc, fav: fav, admin: adminSvc,
 		scanner: scanner, store: store, log: logger, logStore: logStore,
-		thumbs: thumbs, version: version, startedAt: time.Now(),
+		watch: watch, version: version, startedAt: time.Now(),
 	}
 }
 
@@ -91,7 +90,18 @@ func (h *Handlers) Engine() *gin.Engine {
 
 			authed.GET("/favorites", h.handleListFavorites)
 			authed.POST("/favorites", h.handleAddFavorite)
+			authed.POST("/favorites/batch-remove", h.handleBatchRemoveFavorites)
+			authed.POST("/favorites/clean-missing", h.handleCleanMissingFavorites)
 			authed.DELETE("/favorites/:key", h.handleRemoveFavorite)
+
+			// 观看历史与进度（v0.3.0，服务端按用户隔离）。
+			authed.GET("/history", h.handleListHistory)
+			authed.DELETE("/history", h.handleClearHistory)
+			authed.DELETE("/history/:key", h.handleRemoveHistory)
+			authed.GET("/progress", h.handleGetProgress)
+			authed.POST("/progress", h.handleReportProgress)
+			authed.POST("/progress/restart", h.handleRestartProgress)
+			authed.GET("/me/watch-summary", h.handleMyWatchSummary)
 
 			authed.POST("/logs/client", h.handleClientLogs)
 		}
@@ -101,6 +111,7 @@ func (h *Handlers) Engine() *gin.Engine {
 		{
 			admin.GET("/stats", h.handleAdminStats)
 			admin.POST("/scan", h.handleAdminScan)
+			admin.POST("/reset", h.handleAdminReset)
 
 			admin.GET("/folders", h.handleAdminFolders)
 			admin.PUT("/folders", h.handleAdminSetFolder)
@@ -128,8 +139,11 @@ func (h *Handlers) Engine() *gin.Engine {
 			admin.DELETE("/settings/media", h.handleAdminResetMediaRoots)
 			admin.GET("/fs/dirs", h.handleAdminFSDirs)
 
-			admin.GET("/thumbs/stats", h.handleAdminThumbStats)
-			admin.POST("/thumbs/rebuild", h.handleAdminThumbRebuild)
+			// 观看统计与热度（v0.3.0，供控制台与推荐算法）。
+			admin.GET("/watch/heat/media", h.handleAdminMediaHeat)
+			admin.GET("/watch/heat/folders", h.handleAdminFolderHeat)
+			admin.GET("/watch/heat/users", h.handleAdminUserHeat)
+			admin.GET("/recommend", h.handleRecommend)
 
 			admin.GET("/settings/logging", h.handleGetLoggingSettings)
 			admin.PUT("/settings/logging", h.handleSetLoggingSettings)

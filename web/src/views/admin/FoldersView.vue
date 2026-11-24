@@ -14,6 +14,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import { deleteFolderPolicy, listFolders, setFolderPolicy } from '@/api/admin'
+import { formatDuration } from '@/lib/format'
 import type { FolderPolicyView, ScheduleType } from '@/api/types'
 
 const message = useMessage()
@@ -23,7 +24,11 @@ const folders = ref<FolderPolicyView[]>([])
 const loading = ref(true)
 const saving = ref(false)
 const showModal = ref(false)
-const editing = ref<{
+/** 折叠的子目录集合：key = rootIndex:folderPath（v0.3.0 需求 10）。 */
+const collapsed = ref<Set<string>>(new Set())
+const editing = ref<EditState>(blankEdit())
+
+interface EditState {
   root_index: number
   folder_path: string
   enabled: boolean
@@ -31,18 +36,54 @@ const editing = ref<{
   schedule_type: ScheduleType
   time_start: string
   time_end: string
-}>({
-  root_index: 0,
-  folder_path: '',
-  enabled: true,
-  guest_enabled: true,
-  schedule_type: 'always',
-  time_start: '18:00',
-  time_end: '23:00',
-})
+  guest_schedule_type: ScheduleType
+  guest_time_start: string
+  guest_time_end: string
+  sync_children: boolean
+}
+
+function blankEdit(): EditState {
+  return {
+    root_index: 0, folder_path: '', enabled: true, guest_enabled: true,
+    schedule_type: 'always', time_start: '18:00', time_end: '23:00',
+    guest_schedule_type: 'always', guest_time_start: '18:00', guest_time_end: '23:00',
+    sync_children: false,
+  }
+}
 
 const totalMedia = computed(() => folders.value.reduce((sum, f) => sum + f.total, 0))
 const configuredCount = computed(() => folders.value.filter((f) => f.configured).length)
+
+/** 按根分组，构建「根 → 子目录」的成本。子目录行按路径深度排序。 */
+const grouped = computed(() => {
+  const map = new Map<number, FolderPolicyView[]>()
+  for (const f of folders.value) {
+    const arr = map.get(f.root_index) ?? []
+    arr.push(f)
+    map.set(f.root_index, arr)
+  }
+  for (const arr of map.values()) {
+    arr.sort((a, b) => {
+      const depth = (p: string) => (p ? p.split('/').length : 0)
+      return depth(a.folder_path) - depth(b.folder_path) || a.folder_path.localeCompare(b.folder_path)
+    })
+  }
+  return map
+})
+
+/** 某子目录是否处于折叠的根下面（隐藏显示）。 */
+function hiddenByRoot(root: number, path: string): boolean {
+  if (!path) return false
+  return collapsed.value.has(`${root}:`)
+}
+
+function toggleRoot(root: number) {
+  const key = `${root}:`
+  const next = new Set(collapsed.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsed.value = next
+}
 
 async function load() {
   loading.value = true
@@ -64,6 +105,10 @@ function openEdit(folder: FolderPolicyView) {
     schedule_type: folder.configured ? folder.schedule_type : 'always',
     time_start: folder.time_start || '18:00',
     time_end: folder.time_end || '23:00',
+    guest_schedule_type: folder.configured ? (folder.guest_schedule_type || 'always') : 'always',
+    guest_time_start: folder.guest_time_start || '18:00',
+    guest_time_end: folder.guest_time_end || '23:00',
+    sync_children: false,
   }
   showModal.value = true
 }
@@ -71,7 +116,11 @@ function openEdit(folder: FolderPolicyView) {
 async function save() {
   const e = editing.value
   if (e.schedule_type === 'time_window' && (!e.time_start || !e.time_end)) {
-    message.warning('请填写时间窗口的起止时间')
+    message.warning('请填写普通用户时间窗口的起止时间')
+    return
+  }
+  if (e.guest_schedule_type === 'time_window' && (!e.guest_time_start || !e.guest_time_end)) {
+    message.warning('请填写游客时间窗口的起止时间')
     return
   }
   saving.value = true
@@ -81,11 +130,15 @@ async function save() {
       folder_path: e.folder_path,
       enabled: e.enabled,
       guest_enabled: e.guest_enabled,
-      schedule_type: e.enabled || e.guest_enabled ? e.schedule_type : 'disabled',
+      schedule_type: e.enabled ? e.schedule_type : 'disabled',
       time_start: e.time_start,
       time_end: e.time_end,
+      guest_schedule_type: e.guest_enabled ? e.guest_schedule_type : 'disabled',
+      guest_time_start: e.guest_time_start,
+      guest_time_end: e.guest_time_end,
+      sync_children: e.sync_children,
     })
-    message.success('策略已保存，客户端缓存将在数秒内失效')
+    message.success(e.sync_children ? '策略已保存并同步到所有子文件夹' : '策略已保存，客户端缓存将在数秒内失效')
     showModal.value = false
     await load()
   } catch (err) {
@@ -113,9 +166,16 @@ function resetPolicy(folder: FolderPolicyView) {
   })
 }
 
-function scheduleLabel(f: FolderPolicyView) {
+function userScheduleLabel(f: FolderPolicyView) {
   if (f.schedule_type === 'time_window') return `${f.time_start}–${f.time_end}`
-  if (f.schedule_type === 'disabled') return '已禁用'
+  if (f.schedule_type === 'disabled' || !f.enabled) return '不可见'
+  return '始终'
+}
+
+function guestScheduleLabel(f: FolderPolicyView) {
+  const t = f.guest_schedule_type || 'always'
+  if (t === 'time_window') return `${f.guest_time_start}–${f.guest_time_end}`
+  if (t === 'disabled' || !f.guest_enabled) return '不可见'
   return '始终'
 }
 
@@ -151,61 +211,73 @@ onMounted(load)
         <n-button size="small" @click="load">刷新</n-button>
       </div>
       <p class="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">
-        策略优先级：文件级覆盖 &gt; 文件夹策略（同一媒体根内最长前缀）&gt; 全局默认策略 &gt; 默认允许。
-        每个策略分别控制「普通用户」与「游客」，时间窗口两者共用；按服务端时区判断，支持跨零点（如 22:00–02:00）。
+        策略优先级：文件级覆盖 &gt; 文件夹策略（同一媒体根内最长前缀）&gt; 全局默认 &gt; 默认允许。
+        普通用户与游客的播放时段<strong class="text-slate-700">各自独立</strong>；按服务端时区判断，支持跨零点。
+        根目录行可折叠/展开子文件夹，编辑根目录时可选「同步到所有子文件夹」。
       </p>
     </n-card>
 
     <n-spin :show="loading">
-      <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-        <table class="w-full min-w-[860px] text-sm">
+      <div v-for="[root, rows] in grouped" :key="root" class="mb-3 overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <table class="w-full min-w-[900px] text-sm">
           <thead class="bg-slate-50 text-xs text-slate-500">
             <tr>
               <th class="px-4 py-2.5 text-left font-medium">位置</th>
               <th class="px-4 py-2.5 text-left font-medium">媒体</th>
-              <th class="px-4 py-2.5 text-left font-medium">普通用户</th>
-              <th class="px-4 py-2.5 text-left font-medium">游客</th>
+              <th class="px-4 py-2.5 text-left font-medium">普通用户时段</th>
+              <th class="px-4 py-2.5 text-left font-medium">游客时段</th>
+              <th class="px-4 py-2.5 text-left font-medium">热度 / 播放 / 收藏</th>
               <th class="px-4 py-2.5 text-left font-medium">来源</th>
               <th class="px-4 py-2.5 text-right font-medium">操作</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
             <tr
-              v-for="f in folders"
+              v-for="f in rows.filter((x) => x.root_index === -1 || !hiddenByRoot(root, x.folder_path))"
               :key="`${f.root_index}:${f.folder_path}`"
               class="hover:bg-slate-50/70"
-              :class="f.folder_path === '' ? 'bg-slate-50/40' : ''"
+              :class="f.folder_path === '' ? 'bg-slate-50/40 font-medium' : ''"
             >
               <td class="max-w-[340px] px-4 py-2.5">
                 <div class="flex flex-wrap items-center gap-1.5">
+                  <button
+                    v-if="f.folder_path === '' && root >= 0"
+                    class="flex h-5 w-5 items-center justify-center rounded text-slate-500 hover:bg-slate-200"
+                    :title="collapsed.has(`${root}:`) ? '展开子文件夹' : '收起子文件夹'"
+                    @click="toggleRoot(root)"
+                  >
+                    <svg
+                      class="h-3.5 w-3.5 transition"
+                      :class="collapsed.has(`${root}:`) ? '-rotate-90' : ''"
+                      viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    ><path d="m6 9 6 6 6-6" /></svg>
+                  </button>
                   <n-tag size="tiny" :bordered="false" type="default">
                     {{ f.root_index === -1 ? '全局默认' : f.root_name }}
                   </n-tag>
                   <span class="font-mono text-xs text-slate-800">
                     {{ f.folder_path || (f.root_index === -1 ? '所有根目录' : '整个根目录') }}
                   </span>
+                  <n-tag v-if="f.folder_path === '' && f.recursive" size="tiny" :bordered="false" type="info">递归</n-tag>
                 </div>
               </td>
               <td class="px-4 py-2.5 text-xs text-slate-500">
                 {{ f.total }} 项<span class="text-slate-300"> · </span>视频 {{ f.videos }} · 图片 {{ f.images }}
               </td>
               <td class="px-4 py-2.5">
-                <n-tag
-                  size="small"
-                  :type="f.enabled && f.schedule_type !== 'disabled' ? 'success' : 'error'"
-                  :bordered="false"
-                >
-                  {{ f.enabled && f.schedule_type !== 'disabled' ? scheduleLabel(f) : '不可见' }}
+                <n-tag size="small" :type="f.enabled && f.schedule_type !== 'disabled' ? 'success' : 'error'" :bordered="false">
+                  {{ userScheduleLabel(f) }}
                 </n-tag>
               </td>
               <td class="px-4 py-2.5">
-                <n-tag
-                  size="small"
-                  :type="f.guest_enabled && f.schedule_type !== 'disabled' ? 'success' : 'error'"
-                  :bordered="false"
-                >
-                  {{ f.guest_enabled && f.schedule_type !== 'disabled' ? scheduleLabel(f) : '不可见' }}
+                <n-tag size="small" :type="f.guest_enabled && f.guest_schedule_type !== 'disabled' ? 'success' : 'error'" :bordered="false">
+                  {{ guestScheduleLabel(f) }}
                 </n-tag>
+              </td>
+              <td class="px-4 py-2.5 text-xs tabular-nums text-slate-600">
+                <span :title="`播放 ${f.play_count} 次 · 观看 ${formatDuration(f.watched_seconds)} · 收藏 ${f.favorite_count} 次`">
+                  {{ f.play_count }} 播 · {{ formatDuration(f.watched_seconds) }} · {{ f.favorite_count }} 藏
+                </span>
               </td>
               <td class="px-4 py-2.5">
                 <n-tag size="small" :type="sourceLabel(f).type" :bordered="false">{{ sourceLabel(f).text }}</n-tag>
@@ -215,18 +287,16 @@ onMounted(load)
                 <n-button v-if="f.configured" size="tiny" quaternary @click="resetPolicy(f)">恢复默认</n-button>
               </td>
             </tr>
-            <tr v-if="!folders.length && !loading">
-              <td colspan="6" class="px-4 py-10 text-center text-sm text-slate-400">
-                尚未扫描到任何媒体目录，请到「媒体目录」页添加
-              </td>
-            </tr>
           </tbody>
         </table>
       </div>
+      <p v-if="!folders.length && !loading" class="py-10 text-center text-sm text-slate-400">
+        尚未扫描到任何媒体目录，请到「媒体目录」页添加
+      </p>
     </n-spin>
 
-    <n-modal v-model:show="showModal" preset="card" style="width: 480px" title="设置文件夹策略">
-      <div class="space-y-4 text-sm">
+    <n-modal v-model:show="showModal" preset="card" style="width: 560px" title="设置文件夹策略">
+      <div class="space-y-5 text-sm">
         <div>
           <p class="text-xs text-slate-500">位置</p>
           <p class="mt-1 rounded-lg bg-slate-50 px-3 py-2 font-mono text-xs">
@@ -235,43 +305,62 @@ onMounted(load)
           </p>
         </div>
 
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="font-medium">普通用户可见</p>
-            <p class="text-xs text-slate-500">已登录的普通账号</p>
+        <!-- 普通用户 -->
+        <div class="rounded-lg border border-slate-200 p-3">
+          <div class="mb-2 flex items-center justify-between">
+            <p class="font-medium">普通用户</p>
+            <n-switch v-model:value="editing.enabled" />
           </div>
-          <n-switch v-model:value="editing.enabled" />
+          <template v-if="editing.enabled">
+            <p class="mb-1.5 text-xs text-slate-500">播放时段</p>
+            <n-radio-group v-model:value="editing.schedule_type" size="small">
+              <n-radio-button value="always">始终可播</n-radio-button>
+              <n-radio-button value="time_window">时间窗口</n-radio-button>
+            </n-radio-group>
+            <div v-if="editing.schedule_type === 'time_window'" class="mt-2 grid grid-cols-2 gap-3">
+              <div>
+                <p class="mb-1 text-xs text-slate-500">开始 HH:MM</p>
+                <n-input v-model:value="editing.time_start" placeholder="18:00" />
+              </div>
+              <div>
+                <p class="mb-1 text-xs text-slate-500">结束 HH:MM</p>
+                <n-input v-model:value="editing.time_end" placeholder="23:00" />
+              </div>
+            </div>
+          </template>
         </div>
 
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="font-medium">游客可见</p>
-            <p class="text-xs text-slate-500">未登录直接访问的用户</p>
+        <!-- 游客（独立时段，需求 9） -->
+        <div class="rounded-lg border border-slate-200 p-3">
+          <div class="mb-2 flex items-center justify-between">
+            <p class="font-medium">游客</p>
+            <n-switch v-model:value="editing.guest_enabled" />
           </div>
-          <n-switch v-model:value="editing.guest_enabled" />
+          <template v-if="editing.guest_enabled">
+            <p class="mb-1.5 text-xs text-slate-500">播放时段（与普通用户独立）</p>
+            <n-radio-group v-model:value="editing.guest_schedule_type" size="small">
+              <n-radio-button value="always">始终可播</n-radio-button>
+              <n-radio-button value="time_window">时间窗口</n-radio-button>
+            </n-radio-group>
+            <div v-if="editing.guest_schedule_type === 'time_window'" class="mt-2 grid grid-cols-2 gap-3">
+              <div>
+                <p class="mb-1 text-xs text-slate-500">开始 HH:MM</p>
+                <n-input v-model:value="editing.guest_time_start" placeholder="18:00" />
+              </div>
+              <div>
+                <p class="mb-1 text-xs text-slate-500">结束 HH:MM</p>
+                <n-input v-model:value="editing.guest_time_end" placeholder="23:00" />
+              </div>
+            </div>
+          </template>
         </div>
 
-        <div v-if="editing.enabled || editing.guest_enabled">
-          <p class="mb-2 text-xs text-slate-500">播放时段（两个受众共用）</p>
-          <n-radio-group v-model:value="editing.schedule_type">
-            <n-radio-button value="always">始终可播</n-radio-button>
-            <n-radio-button value="time_window">时间窗口</n-radio-button>
-          </n-radio-group>
-        </div>
-
-        <div
-          v-if="(editing.enabled || editing.guest_enabled) && editing.schedule_type === 'time_window'"
-          class="grid grid-cols-2 gap-3"
-        >
+        <div v-if="editing.root_index >= 0 && editing.folder_path === ''" class="flex items-center justify-between rounded-lg bg-slate-50 p-3">
           <div>
-            <p class="mb-1 text-xs text-slate-500">开始时间</p>
-            <n-input v-model:value="editing.time_start" placeholder="18:00" />
+            <p class="font-medium">同步到所有子文件夹</p>
+            <p class="text-xs text-slate-500">把当前根目录策略一键应用到该根下全部子文件夹（需求 10）</p>
           </div>
-          <div>
-            <p class="mb-1 text-xs text-slate-500">结束时间</p>
-            <n-input v-model:value="editing.time_end" placeholder="23:00" />
-          </div>
-          <p class="col-span-2 text-xs text-slate-400">格式 HH:MM；结束时间早于开始时间表示跨零点。</p>
+          <n-switch v-model:value="editing.sync_children" />
         </div>
       </div>
 

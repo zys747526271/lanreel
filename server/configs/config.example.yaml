@@ -20,11 +20,7 @@ media:
   # 图片自动切换停留时长（秒）
   image_display_seconds: 5
   ignored_dirs: [".git", "node_modules", "@eaDir", "#recycle"]
-  # 缩略图：图片由服务端缩放，视频需 ffmpeg（留空自动在 PATH/程序目录查找）
-  thumbnail_enabled: true
-  thumbnail_width: 480
-  thumbnail_seek_seconds: 1
-  ffmpeg_path: ""
+  # 说明：封面不再由服务端生成；浏览器在收藏夹/历史页自动抽帧并缓存（无需 ffmpeg）。
   # 文件系统监听：目录变化后去抖触发扫描；定时扫描仍作为兜底
   watch_enabled: true
   watch_debounce_seconds: 2

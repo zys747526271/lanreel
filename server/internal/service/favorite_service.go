@@ -70,6 +70,8 @@ func (s *FavoriteService) Add(ctx context.Context, u *models.User, videoKey stri
 	if _, err := s.store.AddFavorite(ctx, u.ID, it.Key, it.RelPath); err != nil {
 		return nil, err
 	}
+	// 同步该视频的收藏计数（供收藏按钮与热度统计使用，v0.3.0）。
+	_ = s.store.RefreshFavoriteCounts(ctx, it.Key)
 	s.log.Info(logging.CatBusiness, "api.favorites", "添加收藏", withCtx(ctx, map[string]any{
 		"video_key": it.Key, "rel_path": it.RelPath,
 	}))
@@ -83,10 +85,30 @@ func (s *FavoriteService) Remove(ctx context.Context, u *models.User, videoKey s
 	if err != nil {
 		return err
 	}
+	// 同步该视频的收藏计数（v0.3.0）。
+	_ = s.store.RefreshFavoriteCounts(ctx, videoKey)
 	s.log.Info(logging.CatBusiness, "api.favorites", "取消收藏", withCtx(ctx, map[string]any{
 		"video_key": videoKey, "removed": removed,
 	}))
 	return nil
+}
+
+// RemoveBatch 批量取消收藏（含不可播放条目），返回实际删除数量。
+func (s *FavoriteService) RemoveBatch(ctx context.Context, u *models.User, keys []string) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	n, err := s.store.DeleteFavoritesByKeys(ctx, u.ID, keys)
+	if err != nil {
+		return 0, err
+	}
+	for _, key := range keys {
+		_ = s.store.RefreshFavoriteCounts(ctx, key)
+	}
+	s.log.Info(logging.CatBusiness, "api.favorites", "批量取消收藏", withCtx(ctx, map[string]any{
+		"user_id": u.ID, "count": n,
+	}))
+	return n, nil
 }
 
 // CleanInvalid 清理用户收藏中失效（文件已删除）的条目，返回清理数量（F-28）。
@@ -102,4 +124,16 @@ func (s *FavoriteService) CleanInvalid(ctx context.Context, userID int64) (int, 
 		}
 	}
 	return s.store.DeleteFavoritesByKeys(ctx, userID, invalid)
+}
+
+// CleanMissing 清理当前用户收藏中「文件已丢失」的条目；被管理员屏蔽的文件仍保留。
+func (s *FavoriteService) CleanMissing(ctx context.Context, u *models.User) (int, error) {
+	n, err := s.CleanInvalid(ctx, u.ID)
+	if err != nil {
+		return 0, err
+	}
+	s.log.Info(logging.CatBusiness, "api.favorites", "一键清理丢失文件收藏", withCtx(ctx, map[string]any{
+		"user_id": u.ID, "count": n,
+	}))
+	return n, nil
 }

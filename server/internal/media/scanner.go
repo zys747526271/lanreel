@@ -69,8 +69,10 @@ type Scanner struct {
 	scanning atomic.Bool
 
 	// rootsMu 保护可变媒体根目录（后台可热更新，见 CR-003）。
-	rootsMu sync.RWMutex
-	roots   []string
+	rootsMu   sync.RWMutex
+	roots     []string
+	// recursive 与 roots 一一对应：false 表示只扫描该根的直接子文件，不进入子目录。
+	recursive []bool
 
 	// onScan 扫描完成后的回调（例如把条目交给缩略图生成器）。
 	onScanMu sync.RWMutex
@@ -80,6 +82,11 @@ type Scanner struct {
 // NewScanner 构造扫描器。
 func NewScanner(cfg *config.Config, store MetaStore, logger *logging.Logger) *Scanner {
 	s := &Scanner{cfg: cfg, meta: store, log: logger, roots: append([]string(nil), cfg.Media.Roots...)}
+	rec := make([]bool, len(s.roots))
+	for i := range rec {
+		rec[i] = true
+	}
+	s.recursive = rec
 	s.snap.Store(&Snapshot{ByKey: map[string]*Item{}})
 	return s
 }
@@ -100,19 +107,41 @@ func (s *Scanner) Roots() []string {
 
 // SetRoots 热更新媒体根目录（调用方负责随后触发一次扫描）。
 func (s *Scanner) SetRoots(roots []string) {
+	s.SetRootsWithRecursive(roots, nil)
+}
+
+// SetRootsWithRecursive 热更新媒体根目录，并为每个根设置是否递归导入子目录。
+func (s *Scanner) SetRootsWithRecursive(roots []string, recursive []bool) {
 	clean := make([]string, 0, len(roots))
+	rec := make([]bool, 0, len(roots))
 	seen := map[string]bool{}
-	for _, r := range roots {
+	for i, r := range roots {
 		out, err := NormalizeRoot(r)
 		if err != nil || seen[out] {
 			continue
 		}
 		seen[out] = true
 		clean = append(clean, out)
+		v := true
+		if i < len(recursive) {
+			v = recursive[i]
+		}
+		rec = append(rec, v)
 	}
 	s.rootsMu.Lock()
 	s.roots = clean
+	s.recursive = rec
 	s.rootsMu.Unlock()
+}
+
+// Recursive 返回某根是否递归导入。
+func (s *Scanner) Recursive(rootIndex int) bool {
+	s.rootsMu.RLock()
+	defer s.rootsMu.RUnlock()
+	if rootIndex < 0 || rootIndex >= len(s.recursive) {
+		return true
+	}
+	return s.recursive[rootIndex]
 }
 
 // RootDisplayName 返回媒体根目录的展示名（取路径最后一段，盘符根保留盘符）。
@@ -233,6 +262,7 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 
 	for idx, root := range roots {
 		root := root
+		recursive := s.Recursive(idx)
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				// 单个目录不可读不应中断整体扫描。
@@ -249,6 +279,10 @@ func (s *Scanner) Scan(ctx context.Context) (*Snapshot, ScanSummary, error) {
 			if d.IsDir() {
 				if p == root {
 					return nil
+				}
+				// 非递归根：跳过所有子目录（需求 10）。
+				if !recursive {
+					return fs.SkipDir
 				}
 				if s.skipDir(name) {
 					return fs.SkipDir

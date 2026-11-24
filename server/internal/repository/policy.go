@@ -14,7 +14,8 @@ import (
 // ListFolderPolicies 返回全部文件夹策略。
 func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end, updated_at
+		`SELECT id, root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end,
+		        guest_schedule_type, guest_time_start, guest_time_end, updated_at
 		 FROM folder_policies ORDER BY root_index, folder_path`)
 	if err != nil {
 		return nil, err
@@ -26,7 +27,8 @@ func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, 
 		var enabled, guestEnabled int
 		var updated string
 		if err := rows.Scan(&p.ID, &p.RootIndex, &p.FolderPath, &enabled, &guestEnabled,
-			&p.ScheduleType, &p.TimeStart, &p.TimeEnd, &updated); err != nil {
+			&p.ScheduleType, &p.TimeStart, &p.TimeEnd,
+			&p.GuestScheduleType, &p.GuestTimeStart, &p.GuestTimeEnd, &updated); err != nil {
 			return nil, err
 		}
 		p.Enabled = enabled == 1
@@ -40,15 +42,24 @@ func (s *Store) ListFolderPolicies(ctx context.Context) ([]models.FolderPolicy, 
 // UpsertFolderPolicy 新建或更新文件夹策略。
 func (s *Store) UpsertFolderPolicy(ctx context.Context, p models.FolderPolicy) (*models.FolderPolicy, error) {
 	now := s.now()
+	guestSchedule := p.GuestScheduleType
+	if guestSchedule == "" {
+		guestSchedule = p.ScheduleType
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO folder_policies (root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO folder_policies (root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end,
+		        guest_schedule_type, guest_time_start, guest_time_end, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(root_index, folder_path) DO UPDATE SET
 		   enabled = excluded.enabled, guest_enabled = excluded.guest_enabled,
 		   schedule_type = excluded.schedule_type,
-		   time_start = excluded.time_start, time_end = excluded.time_end, updated_at = excluded.updated_at`,
+		   time_start = excluded.time_start, time_end = excluded.time_end,
+		   guest_schedule_type = excluded.guest_schedule_type,
+		   guest_time_start = excluded.guest_time_start, guest_time_end = excluded.guest_time_end,
+		   updated_at = excluded.updated_at`,
 		p.RootIndex, p.FolderPath, boolToInt(p.Enabled), boolToInt(p.GuestEnabled),
-		p.ScheduleType, p.TimeStart, p.TimeEnd, now)
+		p.ScheduleType, p.TimeStart, p.TimeEnd,
+		guestSchedule, p.GuestTimeStart, p.GuestTimeEnd, now)
 	if err != nil {
 		return nil, err
 	}
@@ -56,10 +67,12 @@ func (s *Store) UpsertFolderPolicy(ctx context.Context, p models.FolderPolicy) (
 	var enabled, guestEnabled int
 	var updated string
 	err = s.db.QueryRowContext(ctx,
-		`SELECT id, root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end, updated_at
+		`SELECT id, root_index, folder_path, enabled, guest_enabled, schedule_type, time_start, time_end,
+		        guest_schedule_type, guest_time_start, guest_time_end, updated_at
 		 FROM folder_policies WHERE root_index = ? AND folder_path = ?`, p.RootIndex, p.FolderPath).
 		Scan(&out.ID, &out.RootIndex, &out.FolderPath, &enabled, &guestEnabled,
-			&out.ScheduleType, &out.TimeStart, &out.TimeEnd, &updated)
+			&out.ScheduleType, &out.TimeStart, &out.TimeEnd,
+			&out.GuestScheduleType, &out.GuestTimeStart, &out.GuestTimeEnd, &updated)
 	if err != nil {
 		return nil, err
 	}
@@ -89,9 +102,11 @@ func (s *Store) GetFileOverride(ctx context.Context, videoKey string) (*models.F
 	var updated string
 	var guestEnabled int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, video_key, enabled, guest_enabled, schedule_type, time_start, time_end, note, updated_at
+		`SELECT id, video_key, enabled, guest_enabled, schedule_type, time_start, time_end,
+		        guest_schedule_type, guest_time_start, guest_time_end, note, updated_at
 		 FROM file_overrides WHERE video_key = ?`, videoKey).
-		Scan(&o.ID, &o.VideoKey, &enabled, &guestEnabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated)
+		Scan(&o.ID, &o.VideoKey, &enabled, &guestEnabled, &o.ScheduleType, &o.TimeStart, &o.TimeEnd,
+			&o.GuestScheduleType, &o.GuestTimeStart, &o.GuestTimeEnd, &o.Note, &updated)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -107,7 +122,8 @@ func (s *Store) GetFileOverride(ctx context.Context, videoKey string) (*models.F
 // ListFileOverrides 返回全部文件级覆盖（key → 覆盖）。
 func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOverride, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, video_key, enabled, guest_enabled, schedule_type, time_start, time_end, note, updated_at FROM file_overrides`)
+		`SELECT id, video_key, enabled, guest_enabled, schedule_type, time_start, time_end,
+		        guest_schedule_type, guest_time_start, guest_time_end, note, updated_at FROM file_overrides`)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +134,8 @@ func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOv
 		var enabled, guestEnabled int
 		var updated string
 		if err := rows.Scan(&o.ID, &o.VideoKey, &enabled, &guestEnabled,
-			&o.ScheduleType, &o.TimeStart, &o.TimeEnd, &o.Note, &updated); err != nil {
+			&o.ScheduleType, &o.TimeStart, &o.TimeEnd,
+			&o.GuestScheduleType, &o.GuestTimeStart, &o.GuestTimeEnd, &o.Note, &updated); err != nil {
 			return nil, err
 		}
 		o.Enabled = enabled == 1
@@ -132,16 +149,24 @@ func (s *Store) ListFileOverrides(ctx context.Context) (map[string]models.FileOv
 // UpsertFileOverride 新建或更新文件级覆盖。
 func (s *Store) UpsertFileOverride(ctx context.Context, o models.FileOverride) (*models.FileOverride, error) {
 	now := s.now()
+	guestSchedule := o.GuestScheduleType
+	if guestSchedule == "" {
+		guestSchedule = o.ScheduleType
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO file_overrides (video_key, enabled, guest_enabled, schedule_type, time_start, time_end, note, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO file_overrides (video_key, enabled, guest_enabled, schedule_type, time_start, time_end,
+		        guest_schedule_type, guest_time_start, guest_time_end, note, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(video_key) DO UPDATE SET
 		   enabled = excluded.enabled, guest_enabled = excluded.guest_enabled,
 		   schedule_type = excluded.schedule_type,
 		   time_start = excluded.time_start, time_end = excluded.time_end,
+		   guest_schedule_type = excluded.guest_schedule_type,
+		   guest_time_start = excluded.guest_time_start, guest_time_end = excluded.guest_time_end,
 		   note = excluded.note, updated_at = excluded.updated_at`,
 		o.VideoKey, boolToInt(o.Enabled), boolToInt(o.GuestEnabled),
-		o.ScheduleType, o.TimeStart, o.TimeEnd, o.Note, now)
+		o.ScheduleType, o.TimeStart, o.TimeEnd,
+		guestSchedule, o.GuestTimeStart, o.GuestTimeEnd, o.Note, now)
 	if err != nil {
 		return nil, err
 	}

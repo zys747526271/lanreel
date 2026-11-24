@@ -121,3 +121,56 @@ func (s *Store) CountAllFavorites(ctx context.Context) (int, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM favorites`).Scan(&n)
 	return n, err
 }
+
+// CountFavoritesByKey 统计单个视频被收藏的次数（v0.3.0 需求 7）。
+func (s *Store) CountFavoritesByKey(ctx context.Context, videoKey string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM favorites WHERE video_key = ?`, videoKey).Scan(&n)
+	return n, err
+}
+
+// CountFavoritesByKeys 批量统计视频收藏次数。
+func (s *Store) CountFavoritesByKeys(ctx context.Context, keys []string) (map[string]int, error) {
+	out := make(map[string]int, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT video_key, COUNT(1) FROM favorites WHERE video_key IN (`+placeholders(len(keys))+`) GROUP BY video_key`,
+		toAnySlice(keys)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var n int
+		if err := rows.Scan(&k, &n); err != nil {
+			return nil, err
+		}
+		out[k] = n
+	}
+	return out, rows.Err()
+}
+
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	out := ""
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			out += ","
+		}
+		out += "?"
+	}
+	return out
+}
+
+func toAnySlice(keys []string) []any {
+	out := make([]any, len(keys))
+	for i, k := range keys {
+		out[i] = k
+	}
+	return out
+}

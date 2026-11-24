@@ -6,6 +6,15 @@ import { reactive, watch } from 'vue'
 
 export type PlaybackRate = 0.5 | 1 | 1.25 | 1.5 | 2 | 3
 
+/** 播放结束后的行为（v0.3.0 需求 3）。 */
+export type EndAction = 'pause' | 'loop' | 'next'
+
+export const END_ACTION_OPTIONS: { value: EndAction; label: string; desc: string }[] = [
+  { value: 'pause', label: '暂停', desc: '播放结束后停在当前画面' },
+  { value: 'loop', label: '循环播放', desc: '当前视频从头重播' },
+  { value: 'next', label: '自动下一个', desc: '切到下一条媒体' },
+]
+
 export const RATE_OPTIONS: { value: PlaybackRate; label: string }[] = [
   { value: 0.5, label: '0.5×' },
   { value: 1, label: '1×' },
@@ -24,6 +33,10 @@ export interface Prefs {
   autoFullscreen: boolean
   /** 进入全屏后尝试锁定横屏（移动端有效） */
   autoRotate: boolean
+  /** 播放结束后的行为（v0.3.0） */
+  endAction: EndAction
+  /** 随机流刷到已看过的视频时是否从头播放（v0.3.0 需求 2） */
+  randomRestartWatched: boolean
 }
 
 const KEY = 'lanreel.prefs'
@@ -33,6 +46,8 @@ const defaults: Prefs = {
   defaultRate: 1,
   autoFullscreen: false,
   autoRotate: false,
+  endAction: 'pause',
+  randomRestartWatched: true,
 }
 
 function load(): Partial<Prefs> {
@@ -83,6 +98,7 @@ export async function enterFullscreen(rotate: boolean): Promise<void> {
 export async function exitFullscreen(): Promise<void> {
   try {
     if (document.fullscreenElement) await document.exitFullscreen()
+    document.documentElement.classList.remove('reel-css-fullscreen-host')
     const orientation = screen.orientation as ScreenOrientation & { unlock?: () => void }
     orientation?.unlock?.()
   } catch {

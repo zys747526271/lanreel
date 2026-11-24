@@ -13,13 +13,17 @@ export const useFeedStore = defineStore('feed', () => {
 
   const isEmpty = computed(() => !loading.value && items.value.length === 0)
 
-  async function loadMore(count = 5) {
+  async function loadMore(count = 5, extraExclude: string[] = []) {
     if (loading.value || !hasMore.value) return
     loading.value = true
     error.value = ''
     const started = performance.now()
     try {
-      const exclude = items.value.slice(-6).map((i) => i.key)
+      // 刷新随机流时排除当前整批，避免只拿到同一批视频看起来像「没刷新」。
+      // 常规上拉加载只排除末尾几条，保留重复观看的机会。
+      const exclude = [...new Set([
+        ...(extraExclude.length ? extraExclude : items.value.slice(-6).map((i) => i.key)),
+      ])]
       const res = await fetchRandom({ limit: count, exclude, mode: mode.value })
       const stamp = Date.now()
       const fresh = res.data

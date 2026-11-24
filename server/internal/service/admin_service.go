@@ -32,6 +32,7 @@ type AdminService struct {
 	store    *repository.Store
 	media    *MediaService
 	fav      *FavoriteService
+	watch    *WatchService
 	eval     *policy.Evaluator
 	authSvc  *AuthService
 	cfg      *config.Config
@@ -42,8 +43,8 @@ type AdminService struct {
 // NewAdminService 构造管理员服务。
 func NewAdminService(store *repository.Store, mediaSvc *MediaService, fav *FavoriteService,
 	eval *policy.Evaluator, authSvc *AuthService, cfg *config.Config,
-	logger *logging.Logger, logStore *logging.SQLiteStore) *AdminService {
-	return &AdminService{store: store, media: mediaSvc, fav: fav, eval: eval,
+	logger *logging.Logger, logStore *logging.SQLiteStore, watchSvc *WatchService) *AdminService {
+	return &AdminService{store: store, media: mediaSvc, fav: fav, watch: watchSvc, eval: eval,
 		authSvc: authSvc, cfg: cfg, log: logger, logStore: logStore}
 }
 
@@ -83,6 +84,9 @@ type StatsView struct {
 	LogCounts      map[string]int    `json:"log_counts"`
 	Registration   bool              `json:"registration_open"`
 	Logging        LoggingSettings   `json:"logging"`
+	// 观看统计（v0.3.0）：历史全站 + 今日全站。
+	WatchSummary      repository.UserWatchSummary   `json:"watch_summary"`
+	TodayWatchSummary repository.DailyWatchSummary  `json:"today_watch_summary"`
 }
 
 // LoggingSettings 日志配置（可热更新）。
@@ -125,12 +129,35 @@ func (s *AdminService) Stats(ctx context.Context) (StatsView, error) {
 	v.Scan = s.media.scannerSummary()
 	v.Registration = s.authSvc.RegistrationOpen(ctx)
 	v.Logging = s.LoggingSettings(ctx)
+	if s.watch != nil {
+		if summary, err := s.watch.AggregateSummary(ctx); err == nil {
+			v.WatchSummary = summary
+		}
+		if summary, err := s.watch.DailySummary(ctx); err == nil {
+			v.TodayWatchSummary = summary
+		}
+	}
 	if s.logStore != nil {
 		if m, err := s.logStore.CountByCategory(ctx); err == nil {
 			v.LogCounts = m
 		}
 	}
 	return v, nil
+}
+
+// ResetToInitial 清空业务数据与日志，恢复到首次部署状态（不删除媒体文件）。
+// 会把媒体根目录恢复为配置文件中的值并触发后台重扫；当前 Token 会因用户被清空而失效。
+func (s *AdminService) ResetToInitial(ctx context.Context) error {
+	if err := s.store.ResetBusinessData(ctx); err != nil {
+		return err
+	}
+	if s.logStore != nil {
+		_, _ = s.logStore.PurgeAll(ctx)
+	}
+	// 重建默认媒体目录快照，使初始化后看到的媒体库与首次部署一致。
+	s.media.scanner.SetRoots(s.cfg.Media.Roots)
+	s.media.scanner.ScanAsync()
+	return nil
 }
 
 // LoggingSettings 读取日志配置。
@@ -317,11 +344,19 @@ type FolderPolicyView struct {
 	ScheduleType  string     `json:"schedule_type"`
 	TimeStart     string     `json:"time_start"`
 	TimeEnd       string     `json:"time_end"`
+	GuestScheduleType string  `json:"guest_schedule_type"`
+	GuestTimeStart    string  `json:"guest_time_start"`
+	GuestTimeEnd      string  `json:"guest_time_end"`
 	Configured    bool       `json:"configured"`
 	Inherited     bool       `json:"inherited"`
 	InheritedFrom string     `json:"inherited_from"`
 	InheritedRoot int        `json:"inherited_root"`
 	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
+	// 热度统计（v0.3.0）。
+	PlayCount      int     `json:"play_count"`
+	WatchedSeconds float64 `json:"watched_seconds"`
+	FavoriteCount  int     `json:"favorite_count"`
+	Recursive      bool    `json:"recursive"`
 }
 
 // ListFolders 列出各媒体根下的文件夹及其生效策略。
@@ -346,6 +381,18 @@ func (s *AdminService) ListFolders(ctx context.Context) ([]FolderPolicyView, err
 	}
 	stats := s.media.Folders()
 
+	// 文件夹热度（v0.3.0）：按 root_index + folder_path 索引。
+	heat := map[fkey]models.FolderStats{}
+	if folderStats, err := s.store.ListFolderStats(ctx); err == nil {
+		for _, fs := range folderStats {
+			heat[fkey{fs.RootIndex, media.NormalizeFolderPath(fs.FolderPath)}] = fs
+		}
+	}
+	recursive := map[int]bool{}
+	if opts, err := s.store.GetAllRootOptions(ctx); err == nil {
+		recursive = opts
+	}
+
 	out := make([]FolderPolicyView, 0, len(stats)+len(pols)+len(roots))
 	seen := map[fkey]bool{}
 
@@ -363,6 +410,15 @@ func (s *AdminService) ListFolders(ctx context.Context) ([]FolderPolicyView, err
 			RootIndex: root, RootName: name, FolderPath: key.path,
 			Total: totals[0], Videos: totals[1], Images: totals[2],
 			Enabled: true, GuestEnabled: true, ScheduleType: models.ScheduleAlways,
+			GuestScheduleType: models.ScheduleAlways, Recursive: true,
+		}
+		if opt, ok := recursive[root]; ok {
+			v.Recursive = opt
+		}
+		if fs, ok := heat[key]; ok {
+			v.PlayCount = fs.PlayCount
+			v.WatchedSeconds = fs.WatchedSeconds
+			v.FavoriteCount = fs.FavoriteCount
 		}
 		if p, ok := pmap[key]; ok {
 			v.Enabled = p.Enabled
@@ -370,6 +426,9 @@ func (s *AdminService) ListFolders(ctx context.Context) ([]FolderPolicyView, err
 			v.ScheduleType = p.ScheduleType
 			v.TimeStart = p.TimeStart
 			v.TimeEnd = p.TimeEnd
+			v.GuestScheduleType = p.GuestScheduleType
+			v.GuestTimeStart = p.GuestTimeStart
+			v.GuestTimeEnd = p.GuestTimeEnd
 			v.Configured = true
 			t := p.UpdatedAt
 			v.UpdatedAt = &t
@@ -380,6 +439,9 @@ func (s *AdminService) ListFolders(ctx context.Context) ([]FolderPolicyView, err
 			v.ScheduleType = p.ScheduleType
 			v.TimeStart = p.TimeStart
 			v.TimeEnd = p.TimeEnd
+			v.GuestScheduleType = p.GuestScheduleType
+			v.GuestTimeStart = p.GuestTimeStart
+			v.GuestTimeEnd = p.GuestTimeEnd
 			v.Inherited = true
 			v.InheritedFrom = media.NormalizeFolderPath(p.FolderPath)
 			v.InheritedRoot = p.RootIndex
@@ -421,13 +483,18 @@ func (s *AdminService) ListFolders(ctx context.Context) ([]FolderPolicyView, err
 
 // FolderPolicyInput 文件夹策略输入。
 type FolderPolicyInput struct {
-	RootIndex    int    `json:"root_index"`
-	FolderPath   string `json:"folder_path"`
-	Enabled      bool   `json:"enabled"`
-	GuestEnabled bool   `json:"guest_enabled"`
-	ScheduleType string `json:"schedule_type"`
-	TimeStart    string `json:"time_start"`
-	TimeEnd      string `json:"time_end"`
+	RootIndex         int    `json:"root_index"`
+	FolderPath        string `json:"folder_path"`
+	Enabled           bool   `json:"enabled"`
+	GuestEnabled      bool   `json:"guest_enabled"`
+	ScheduleType      string `json:"schedule_type"`
+	TimeStart         string `json:"time_start"`
+	TimeEnd           string `json:"time_end"`
+	GuestScheduleType string `json:"guest_schedule_type"`
+	GuestTimeStart    string `json:"guest_time_start"`
+	GuestTimeEnd      string `json:"guest_time_end"`
+	// SyncChildren 仅对根目录生效：把该根策略同步到所有子文件夹（v0.3.0）。
+	SyncChildren bool `json:"sync_children"`
 }
 
 // SetFolderPolicy 设置文件夹策略（F-12 / F-14，按根索引隔离）。
@@ -452,6 +519,21 @@ func (s *AdminService) SetFolderPolicy(ctx context.Context, admin *models.User, 
 			return nil, fmt.Errorf("%w: 时间窗口格式应为 HH:MM", ErrValidation)
 		}
 	}
+	// 游客时段独立校验（v0.3.0）；为空时回落到普通用户时段（兼容旧数据）。
+	guestSchedule := in.GuestScheduleType
+	if guestSchedule == "" {
+		guestSchedule = in.ScheduleType
+	}
+	switch guestSchedule {
+	case "", models.ScheduleAlways, models.ScheduleTimeWindow, models.ScheduleDisabled:
+	default:
+		return nil, fmt.Errorf("%w: 游客调度类型非法", ErrValidation)
+	}
+	if guestSchedule == models.ScheduleTimeWindow {
+		if !validHHMM(in.GuestTimeStart) || !validHHMM(in.GuestTimeEnd) {
+			return nil, fmt.Errorf("%w: 游客时间窗口格式应为 HH:MM", ErrValidation)
+		}
+	}
 	var before any
 	if pols, err := s.store.ListFolderPolicies(ctx); err == nil {
 		for _, p := range pols {
@@ -465,9 +547,24 @@ func (s *AdminService) SetFolderPolicy(ctx context.Context, admin *models.User, 
 		RootIndex: in.RootIndex, FolderPath: in.FolderPath, Enabled: in.Enabled,
 		GuestEnabled: in.GuestEnabled, ScheduleType: in.ScheduleType,
 		TimeStart: in.TimeStart, TimeEnd: in.TimeEnd,
+		GuestScheduleType: guestSchedule, GuestTimeStart: in.GuestTimeStart, GuestTimeEnd: in.GuestTimeEnd,
 	})
 	if err != nil {
 		return nil, err
+	}
+	// 同步根策略到所有子文件夹（v0.3.0 需求 10）。
+	if in.SyncChildren && in.FolderPath == "" && in.RootIndex >= 0 {
+		for _, st := range s.media.Folders() {
+			if st.RootIndex != in.RootIndex || st.FolderPath == "" {
+				continue
+			}
+			_, _ = s.store.UpsertFolderPolicy(ctx, models.FolderPolicy{
+				RootIndex: in.RootIndex, FolderPath: st.FolderPath,
+				Enabled: in.Enabled, GuestEnabled: in.GuestEnabled,
+				ScheduleType: in.ScheduleType, TimeStart: in.TimeStart, TimeEnd: in.TimeEnd,
+				GuestScheduleType: guestSchedule, GuestTimeStart: in.GuestTimeStart, GuestTimeEnd: in.GuestTimeEnd,
+			})
+		}
 	}
 	s.eval.Invalidate()
 	s.audit(ctx, admin, models.AuditTargetFolder,
@@ -593,12 +690,15 @@ func (s *AdminService) GetFile(ctx context.Context, key string) (*FileView, erro
 
 // FileOverrideInput 文件级策略输入。
 type FileOverrideInput struct {
-	Enabled      bool   `json:"enabled"`
-	GuestEnabled bool   `json:"guest_enabled"`
-	ScheduleType string `json:"schedule_type"`
-	TimeStart    string `json:"time_start"`
-	TimeEnd      string `json:"time_end"`
-	Note         string `json:"note"`
+	Enabled           bool   `json:"enabled"`
+	GuestEnabled      bool   `json:"guest_enabled"`
+	ScheduleType      string `json:"schedule_type"`
+	TimeStart         string `json:"time_start"`
+	TimeEnd           string `json:"time_end"`
+	GuestScheduleType string `json:"guest_schedule_type"`
+	GuestTimeStart    string `json:"guest_time_start"`
+	GuestTimeEnd      string `json:"guest_time_end"`
+	Note              string `json:"note"`
 }
 
 // SetFileOverride 设置文件级覆盖（F-13）。
@@ -619,6 +719,15 @@ func (s *AdminService) SetFileOverride(ctx context.Context, admin *models.User, 
 			return nil, fmt.Errorf("%w: 时间窗口格式应为 HH:MM", ErrValidation)
 		}
 	}
+	guestSchedule := in.GuestScheduleType
+	if guestSchedule == "" {
+		guestSchedule = in.ScheduleType
+	}
+	if guestSchedule == models.ScheduleTimeWindow {
+		if !validHHMM(in.GuestTimeStart) || !validHHMM(in.GuestTimeEnd) {
+			return nil, fmt.Errorf("%w: 游客时间窗口格式应为 HH:MM", ErrValidation)
+		}
+	}
 	var before any
 	if b, err := s.store.GetFileOverride(ctx, key); err == nil {
 		before = b
@@ -626,7 +735,9 @@ func (s *AdminService) SetFileOverride(ctx context.Context, admin *models.User, 
 	o, err := s.store.UpsertFileOverride(ctx, models.FileOverride{
 		VideoKey: key, Enabled: in.Enabled, GuestEnabled: in.GuestEnabled,
 		ScheduleType: in.ScheduleType,
-		TimeStart:    in.TimeStart, TimeEnd: in.TimeEnd, Note: in.Note,
+		TimeStart:    in.TimeStart, TimeEnd: in.TimeEnd,
+		GuestScheduleType: guestSchedule, GuestTimeStart: in.GuestTimeStart, GuestTimeEnd: in.GuestTimeEnd,
+		Note: in.Note,
 	})
 	if err != nil {
 		return nil, err
@@ -708,13 +819,17 @@ func (s *AdminService) PurgeLogs(ctx context.Context, admin *models.User) (int, 
 
 func evaluateOverride(o *models.FileOverride, loc *time.Location, guest bool) (bool, string) {
 	visible := o.Enabled
+	scheduleType, start, end := o.ScheduleType, o.TimeStart, o.TimeEnd
 	if guest {
 		visible = o.GuestEnabled
+		if o.GuestScheduleType != "" {
+			scheduleType, start, end = o.GuestScheduleType, o.GuestTimeStart, o.GuestTimeEnd
+		}
 	}
-	if !visible || o.ScheduleType == models.ScheduleDisabled {
+	if !visible || scheduleType == models.ScheduleDisabled {
 		return false, models.ReasonDisabledByAdmin
 	}
-	if o.ScheduleType == models.ScheduleTimeWindow && !policy.InWindow(time.Now().In(loc), o.TimeStart, o.TimeEnd, loc) {
+	if scheduleType == models.ScheduleTimeWindow && !policy.InWindow(time.Now().In(loc), start, end, loc) {
 		return false, models.ReasonOutOfWindow
 	}
 	return true, ""
@@ -758,9 +873,16 @@ func (s *AdminService) GetStats(ctx context.Context) (StatsView, error) { return
 // SettingMediaRoots 媒体根目录设置键（JSON 数组；空串表示回落到配置文件）。
 const SettingMediaRoots = "media_roots"
 
+// RootSettingView 单个媒体根的设置（含递归选项）。
+type RootSettingView struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
 // MediaSettingsView 媒体目录设置与扫描状态。
 type MediaSettingsView struct {
 	Roots        []string          `json:"roots"`
+	RootSettings []RootSettingView `json:"root_settings"`
 	Source       string            `json:"source"` // database=后台设置，config=配置文件
 	ConfigRoots  []string          `json:"config_roots"`
 	ScanInterval int               `json:"scan_interval_seconds"`
@@ -801,8 +923,13 @@ func (s *AdminService) MediaSettings(ctx context.Context) MediaSettingsView {
 	if s.store.GetSetting(ctx, SettingMediaRoots, "") != "" {
 		source = "database"
 	}
+	settings := make([]RootSettingView, 0, len(roots))
+	for i, r := range roots {
+		settings = append(settings, RootSettingView{Path: r, Recursive: s.store.GetRootRecursive(ctx, i)})
+	}
 	return MediaSettingsView{
 		Roots:        roots,
+		RootSettings: settings,
 		Source:       source,
 		ConfigRoots:  append([]string(nil), s.cfg.Media.Roots...),
 		ScanInterval: s.cfg.Media.ScanIntervalSeconds,
@@ -813,9 +940,13 @@ func (s *AdminService) MediaSettings(ctx context.Context) MediaSettingsView {
 	}
 }
 
-// UpdateMediaRoots 保存媒体目录并触发后台重扫（F-06 的运行时扩展）。
-// 目录必须是存在的绝对路径；更换目录会重新计算 video_key，旧收藏可能失效。
+// UpdateMediaRoots 保存媒体目录并触发后台重扫（兼容旧调用，全部递归）。
 func (s *AdminService) UpdateMediaRoots(ctx context.Context, admin *models.User, roots []string) (MediaSettingsView, error) {
+	return s.UpdateMediaRootsEx(ctx, admin, roots, nil)
+}
+
+// UpdateMediaRootsEx 保存媒体目录及其递归选项并触发后台重扫（v0.3.0）。
+func (s *AdminService) UpdateMediaRootsEx(ctx context.Context, admin *models.User, roots []string, recursive []bool) (MediaSettingsView, error) {
 	if len(roots) == 0 {
 		return MediaSettingsView{}, fmt.Errorf("%w: 至少保留一个媒体目录", ErrValidation)
 	}
@@ -823,8 +954,9 @@ func (s *AdminService) UpdateMediaRoots(ctx context.Context, admin *models.User,
 		return MediaSettingsView{}, fmt.Errorf("%w: 最多配置 16 个媒体目录", ErrValidation)
 	}
 	clean := make([]string, 0, len(roots))
+	cleanRec := make([]bool, 0, len(roots))
 	seen := map[string]bool{}
-	for _, p := range roots {
+	for i, p := range roots {
 		out, err := media.NormalizeRoot(p)
 		if err != nil {
 			return MediaSettingsView{}, fmt.Errorf("%w: %s（%v）", ErrValidation, strings.TrimSpace(p), err)
@@ -834,6 +966,11 @@ func (s *AdminService) UpdateMediaRoots(ctx context.Context, admin *models.User,
 		}
 		seen[out] = true
 		clean = append(clean, out)
+		v := true
+		if i < len(recursive) {
+			v = recursive[i]
+		}
+		cleanRec = append(cleanRec, v)
 	}
 	if len(clean) == 0 {
 		return MediaSettingsView{}, fmt.Errorf("%w: 至少保留一个媒体目录", ErrValidation)
@@ -847,7 +984,13 @@ func (s *AdminService) UpdateMediaRoots(ctx context.Context, admin *models.User,
 	if err := s.store.SetSetting(ctx, SettingMediaRoots, string(raw)); err != nil {
 		return MediaSettingsView{}, err
 	}
-	s.media.Scanner().SetRoots(clean)
+	// 保存每个根的递归选项。
+	for i, v := range cleanRec {
+		if err := s.store.SetRootRecursive(ctx, i, v); err != nil {
+			return MediaSettingsView{}, err
+		}
+	}
+	s.media.Scanner().SetRootsWithRecursive(clean, cleanRec)
 	s.media.Scanner().ScanAsync()
 	s.audit(ctx, admin, models.AuditTargetSetting, SettingMediaRoots, "更新媒体目录", before.Roots, clean)
 

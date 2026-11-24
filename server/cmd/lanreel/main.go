@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -29,11 +28,10 @@ import (
 	"github.com/zys747526271/lanreel/server/internal/policy"
 	"github.com/zys747526271/lanreel/server/internal/repository"
 	"github.com/zys747526271/lanreel/server/internal/service"
-	"github.com/zys747526271/lanreel/server/internal/thumb"
 )
 
 // version 由构建脚本通过 -ldflags 注入。
-var version = "0.2.1"
+var version = "0.3.0"
 
 func main() {
 	var (
@@ -102,26 +100,19 @@ func main() {
 		fmt.Printf("尚未创建管理员：请打开 http://<本机或局域网IP>:%d 按页面引导完成初始化\n", cfg.Server.Port)
 	}
 
-	dataDir := cfg.App.DataDir
-	if dataDir == "" {
-		dataDir = "./data"
-	}
-	thumbGen := thumb.New(thumb.Config{
-		Dir:         filepath.Join(dataDir, "thumbs"),
-		FFmpegPath:  cfg.Media.FFmpegPath,
-		Width:       cfg.Media.ThumbnailWidth,
-		SeekSeconds: cfg.Media.ThumbnailSeekSeconds,
-		Enabled:     cfg.Media.ThumbnailEnabled,
-	}, logger)
-
 	scanner := media.NewScanner(cfg, store, logger)
-	scanner.SetOnScan(thumbGen.Enqueue)
 	evaluator := policy.NewEvaluator(store, cfg.Location, logger)
-	mediaSvc := service.NewMediaService(scanner, evaluator, cfg, logger)
+	mediaSvc := service.NewMediaService(scanner, evaluator, cfg, logger, store)
 	favSvc := service.NewFavoriteService(store, mediaSvc, logger)
-	adminSvc := service.NewAdminService(store, mediaSvc, favSvc, evaluator, authSvc, cfg, logger, logStore)
-	// 后台可覆盖媒体目录（CR-003）：启动时优先使用已保存的设置。
-	scanner.SetRoots(adminSvc.EffectiveMediaRoots(context.Background()))
+	watchSvc := service.NewWatchService(store, mediaSvc)
+	adminSvc := service.NewAdminService(store, mediaSvc, favSvc, evaluator, authSvc, cfg, logger, logStore, watchSvc)
+	// 后台可覆盖媒体目录（CR-003）：启动时优先使用已保存的设置，并应用每个根的递归选项。
+	effectiveRoots := adminSvc.EffectiveMediaRoots(context.Background())
+	recursiveOpts := make([]bool, len(effectiveRoots))
+	for i := range effectiveRoots {
+		recursiveOpts[i] = store.GetRootRecursive(context.Background(), i)
+	}
+	scanner.SetRootsWithRecursive(effectiveRoots, recursiveOpts)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -153,7 +144,6 @@ func main() {
 		"config_file":   cfg.ConfigFile,
 	})
 
-	thumbGen.Start(ctx)
 	scanner.Start(ctx)
 	if cfg.Media.WatchEnabled {
 		watcher := media.NewWatcher(scanner, logger,
@@ -161,7 +151,7 @@ func main() {
 		go watcher.Run(ctx)
 	}
 
-	handlers := api.NewHandlers(cfg, authSvc, mediaSvc, favSvc, adminSvc, scanner, store, logger, logStore, thumbGen, version)
+	handlers := api.NewHandlers(cfg, authSvc, mediaSvc, favSvc, adminSvc, scanner, store, logger, logStore, watchSvc, version)
 	engine := handlers.Engine()
 
 	srv := &http.Server{

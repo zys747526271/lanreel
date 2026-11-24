@@ -1,30 +1,30 @@
 <script setup lang="ts">
-/** 独立的观看历史页：与收藏夹同款网格，支持互切、移除与清空。 */
+/** 独立的观看历史页：服务端按用户隔离，与收藏夹同款网格，支持互切、移除与清空。 */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import MediaGrid from '@/components/media/MediaGrid.vue'
-import { fetchMediaStatus } from '@/api/media'
 import { useAuthStore } from '@/stores/auth'
 import { reasonText } from '@/lib/format'
 import { logger } from '@/lib/logger'
-import { clearHistory, listHistory, removeHistory, type HistoryEntry } from '@/lib/history'
+import { clearHistory, listHistory, removeHistory } from '@/api/watch'
 import { removeCachedThumb } from '@/lib/thumbCache'
 import { rememberPlayerRoute } from '@/lib/session'
-import type { MediaItem } from '@/api/types'
+import type { HistoryEntryView, MediaItem } from '@/api/types'
 
 const router = useRouter()
 const auth = useAuthStore()
 
-const entries = ref<HistoryEntry[]>([])
+const entries = ref<HistoryEntryView[]>([])
 const loading = ref(true)
 const error = ref('')
 const SCROLL_KEY = 'lanreel.history.scroll'
 
+/** 把服务端历史条目映射成网格可显示项，附带观看进度（v0.3.0 需求 2）。 */
 const items = computed<MediaItem[]>(() =>
   entries.value.map((h) => ({
     key: h.key,
     media_type: h.media_type,
-    root_index: 0,
+    root_index: h.root_index ?? 0,
     root_name: h.root_name,
     rel_path: h.rel_path,
     folder: h.folder,
@@ -33,6 +33,8 @@ const items = computed<MediaItem[]>(() =>
     playable: h.playable,
     reason: h.playable ? undefined : h.reason ?? 'unavailable',
     favorite: false,
+    favorite_count: h.favorite_count,
+    watchProgress: h.progress,
     stream_url: h.stream_url,
     thumb_url: h.thumb_url,
   })),
@@ -43,25 +45,8 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const saved = await listHistory(100)
-    // 历史是本机快照：条目后来被管理员禁用 / 时段变化 / 文件丢失时，
-    // 必须以服务端实时判定刷新，才能对无权限内容做模糊遮挡和原因提示。
-    const keys = saved.map((h) => h.key).filter(Boolean)
-    if (keys.length) {
-      try {
-        const res = await fetchMediaStatus(keys)
-        const live = new Map(res.data.map((s) => [s.key, s]))
-        entries.value = saved.map((h) => {
-          const s = live.get(h.key)
-          return s ? { ...h, playable: s.playable, reason: s.reason } : h
-        })
-      } catch {
-        // 接口不可用时沿用本地快照，不阻塞历史页展示
-        entries.value = saved
-      }
-    } else {
-      entries.value = saved
-    }
+    // 服务端已按用户隔离并附带实时权限与进度，无需再拉状态接口。
+    entries.value = (await listHistory(100)).data
   } catch (err) {
     error.value = err instanceof Error ? err.message : '读取观看历史失败'
     logger.warn('app', 'history', '读取观看历史失败', { error: error.value })
@@ -88,7 +73,7 @@ async function drop(item: MediaItem) {
 }
 
 async function clearAll() {
-  if (!window.confirm('确认清空观看历史？该操作仅影响本机记录。')) return
+  if (!window.confirm('确认清空观看历史？该操作仅影响你的账号记录。')) return
   await clearHistory()
   entries.value = []
 }
@@ -169,7 +154,7 @@ onMounted(async () => {
       </svg>
       <p class="text-sm text-white/70">还没有观看记录</p>
       <p class="max-w-[16rem] text-xs leading-relaxed text-white/40">
-        停留观看超过 1.5 秒的内容会出现在这里，仅保存在本机
+        观看过的内容会出现在这里，按你的账号独立保存，可随时续播
       </p>
       <button class="mt-1 rounded-full bg-white px-4 py-2 text-sm font-medium text-black" @click="goBack">
         去看看

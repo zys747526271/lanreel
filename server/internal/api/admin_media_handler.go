@@ -24,8 +24,42 @@ func (h *Handlers) handleAdminMediaSettings(c *gin.Context) {
 	ok(c, h.admin.MediaSettings(c.Request.Context()))
 }
 
+type mediaRootInput struct {
+	Path      string `json:"path"`
+	Recursive *bool  `json:"recursive"`
+}
+
 type mediaRootsRequest struct {
-	Roots []string `json:"roots" binding:"required"`
+	Roots      []string         `json:"roots"`
+	RootInputs []mediaRootInput `json:"root_inputs"`
+	// Recursive 全局默认（当 root_inputs 未提供时使用）。
+	Recursive *bool `json:"recursive"`
+}
+
+// normalize 把兼容旧版的 roots []string 与新版的 root_inputs 统一成路径 + 递归标志。
+func (r mediaRootsRequest) normalize() ([]string, []bool) {
+	paths := r.Roots
+	rec := make([]bool, 0, len(paths))
+	if len(r.RootInputs) > 0 {
+		paths = make([]string, 0, len(r.RootInputs))
+		for _, in := range r.RootInputs {
+			paths = append(paths, in.Path)
+			v := true
+			if in.Recursive != nil {
+				v = *in.Recursive
+			}
+			rec = append(rec, v)
+		}
+	} else {
+		v := true
+		if r.Recursive != nil {
+			v = *r.Recursive
+		}
+		for range paths {
+			rec = append(rec, v)
+		}
+	}
+	return paths, rec
 }
 
 // handleAdminSetMediaRoots PUT /api/v1/admin/settings/media
@@ -43,7 +77,12 @@ func (h *Handlers) handleAdminSetMediaRoots(c *gin.Context) {
 		fail(c, http.StatusUnauthorized, "unauthorized", "请先登录")
 		return
 	}
-	v, err := h.admin.UpdateMediaRoots(c.Request.Context(), u, req.Roots)
+	paths, recursive := req.normalize()
+	if len(paths) == 0 {
+		fail(c, http.StatusBadRequest, "invalid_body", "至少保留一个媒体目录")
+		return
+	}
+	v, err := h.admin.UpdateMediaRootsEx(c.Request.Context(), u, paths, recursive)
 	if err != nil {
 		failService(c, err)
 		return

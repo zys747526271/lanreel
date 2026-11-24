@@ -5,13 +5,26 @@ import router from './router'
 import { installGlobalErrorHooks, logger } from './lib/logger'
 import { fetchPublicConfig } from './api/client'
 import { clearAllPlayerSessions } from './lib/session'
+import { pauseAllVideos } from './lib/playerRegistry'
 import './styles/main.css'
 
 installGlobalErrorHooks()
 
-// 整页刷新（F5）不是「从设置返回」：清掉会话，下次进入重新随机播放。
-window.addEventListener('pagehide', clearAllPlayerSessions)
-window.addEventListener('beforeunload', clearAllPlayerSessions)
+/**
+ * 只有真正的手动刷新才清掉会话并重新随机。
+ * 不再监听 pagehide/beforeunload 清会话：手机横竖屏或全屏时浏览器可能重建 WebView，
+ * 此时清掉会话会让页面像被刷新一样重新随机，出现黑屏与串音。
+ */
+const navEntry = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+if (navEntry?.type === 'reload') clearAllPlayerSessions()
+
+// 页面进入 bfcache / 关闭时暂停所有视频，避免后台残留别的视频声音。
+window.addEventListener('pagehide', () => pauseAllVideos())
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) pauseAllVideos()
+})
+// 播放器自管滚动位置，交给浏览器恢复容易错位。
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
 
 // 读取服务端配置：决定是否允许前端日志上报（F-41，默认关闭）
 void fetchPublicConfig()

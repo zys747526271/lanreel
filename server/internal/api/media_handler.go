@@ -162,19 +162,6 @@ func (h *Handlers) handleThumb(c *gin.Context) {
 		fail(c, http.StatusNotFound, "media_not_found", "媒体不存在")
 		return
 	}
-	if h.thumbs != nil {
-		if p := h.thumbs.Path(key); h.thumbs.Exists(key) {
-			if f, err := os.Open(p); err == nil {
-				defer f.Close()
-				if st, err := f.Stat(); err == nil && !st.IsDir() {
-					c.Writer.Header().Set("Cache-Control", "public, max-age=86400")
-					c.Writer.Header().Set("Content-Type", "image/jpeg")
-					http.ServeContent(c.Writer, c.Request, filepath.Base(p), st.ModTime(), f)
-					return
-				}
-			}
-		}
-	}
 	if item.Type == models.MediaImage {
 		abs, err := media.ResolveVerified(item)
 		if err != nil {
@@ -197,22 +184,8 @@ func (h *Handlers) handleThumb(c *gin.Context) {
 		http.ServeContent(c.Writer, c.Request, filepath.Base(abs), modTime, f)
 		return
 	}
-	// 视频缩略图：预留给后续缩略图生成（存放于数据目录 thumbs/{key}.jpg）。
-	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp"} {
-		p := filepath.Join(h.cfg.App.DataDir, "thumbs", key+ext)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			f, err := os.Open(p)
-			if err != nil {
-				continue
-			}
-			defer f.Close()
-			c.Writer.Header().Set("Cache-Control", "public, max-age=86400")
-			c.Writer.Header().Set("Content-Type", contentTypeByExt(p))
-			http.ServeContent(c.Writer, c.Request, filepath.Base(p), st.ModTime(), f)
-			return
-		}
-	}
-	fail(c, http.StatusNotFound, "thumb_unavailable", "暂无缩略图")
+	// v0.3.0：移除服务端视频缩略图生成，统一由前端悬停抽帧 + IndexedDB 缓存。
+	fail(c, http.StatusNotFound, "thumb_unavailable", "视频封面由客户端抽帧生成")
 }
 
 func reasonMessage(reason string) string {

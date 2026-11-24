@@ -170,6 +170,16 @@ func (s *SQLiteStore) Purge(ctx context.Context, before time.Time, maxEntries in
 	return deleted, nil
 }
 
+// PurgeAll 清空运行日志（恢复初始化使用）。
+func (s *SQLiteStore) PurgeAll(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM system_logs")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // GetByID 按主键查询单条日志。
 func (s *SQLiteStore) GetByID(ctx context.Context, id int64) (*models.SystemLogEntry, error) {
 	var (

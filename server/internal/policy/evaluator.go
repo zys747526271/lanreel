@@ -120,19 +120,28 @@ func (e *Evaluator) Evaluate(ctx context.Context, item *media.Item, v Viewer, no
 	defer e.mu.RUnlock()
 
 	if ov, ok := e.files[item.Key]; ok {
-		return e.decide(ov.Enabled, ov.GuestEnabled, ov.ScheduleType, ov.TimeStart, ov.TimeEnd, v, now)
+		return e.decide(ov.Enabled, ov.GuestEnabled,
+			ov.ScheduleType, ov.TimeStart, ov.TimeEnd,
+			ov.GuestScheduleType, ov.GuestTimeStart, ov.GuestTimeEnd, v, now)
 	}
 	if p, ok := e.matchFolder(item.RootIndex, item.Folder()); ok {
-		return e.decide(p.Enabled, p.GuestEnabled, p.ScheduleType, p.TimeStart, p.TimeEnd, v, now)
+		return e.decide(p.Enabled, p.GuestEnabled,
+			p.ScheduleType, p.TimeStart, p.TimeEnd,
+			p.GuestScheduleType, p.GuestTimeStart, p.GuestTimeEnd, v, now)
 	}
 	return Decision{Playable: true}
 }
 
-// decide 依据受众与时间窗给出判定。
-func (e *Evaluator) decide(enabled, guestEnabled bool, scheduleType, start, end string, v Viewer, now time.Time) Decision {
+// decide 依据受众与时间窗给出判定（v0.3.0：用户与游客的播放时段互相独立）。
+// 游客优先使用 GuestSchedule*，未配置（空）时回落到普通用户时段，兼容旧数据。
+func (e *Evaluator) decide(enabled, guestEnabled bool, scheduleType, start, end string,
+	guestScheduleType, guestStart, guestEnd string, v Viewer, now time.Time) Decision {
 	visible := enabled
 	if v.IsGuest {
 		visible = guestEnabled
+		if guestScheduleType != "" {
+			scheduleType, start, end = guestScheduleType, guestStart, guestEnd
+		}
 	}
 	if !visible || scheduleType == models.ScheduleDisabled {
 		return Decision{Playable: false, Reason: models.ReasonDisabledByAdmin}

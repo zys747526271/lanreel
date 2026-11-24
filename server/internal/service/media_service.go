@@ -12,6 +12,7 @@ import (
 	"github.com/zys747526271/lanreel/server/internal/media"
 	"github.com/zys747526271/lanreel/server/internal/models"
 	"github.com/zys747526271/lanreel/server/internal/policy"
+	"github.com/zys747526271/lanreel/server/internal/repository"
 )
 
 // MediaView 返回给客户端的媒体视图（协议稳定，新增字段不破坏旧客户端，见 9.2）。
@@ -27,6 +28,8 @@ type MediaView struct {
 	Playable  bool    `json:"playable"`
 	Reason    string  `json:"reason,omitempty"`
 	Favorite  bool    `json:"favorite"`
+	// FavoriteCount 当前视频被收藏的次数（v0.3.0 需求 7，非全站总数）。
+	FavoriteCount int    `json:"favorite_count"`
 	StreamURL string  `json:"stream_url"`
 	ThumbURL  string  `json:"thumb_url"`
 }
@@ -37,11 +40,12 @@ type MediaService struct {
 	evaluator *policy.Evaluator
 	cfg       *config.Config
 	log       *logging.Logger
+	store     *repository.Store
 }
 
 // NewMediaService 构造媒体服务。
-func NewMediaService(scanner *media.Scanner, evaluator *policy.Evaluator, cfg *config.Config, logger *logging.Logger) *MediaService {
-	return &MediaService{scanner: scanner, evaluator: evaluator, cfg: cfg, log: logger}
+func NewMediaService(scanner *media.Scanner, evaluator *policy.Evaluator, cfg *config.Config, logger *logging.Logger, store *repository.Store) *MediaService {
+	return &MediaService{scanner: scanner, evaluator: evaluator, cfg: cfg, log: logger, store: store}
 }
 
 // Get 按 key 查询媒体条目。
@@ -78,6 +82,13 @@ func (s *MediaService) BuildView(ctx context.Context, u *models.User, item *medi
 		Favorite:  favorited != nil && favorited[item.Key],
 		StreamURL: "/api/v1/media/" + item.Key + "/stream",
 		ThumbURL:  "/api/v1/media/" + item.Key + "/thumb",
+	}
+	if s.store != nil {
+		if st, err := s.store.GetMediaStats(ctx, item.Key); err == nil {
+			v.FavoriteCount = st.FavoriteCount
+		} else if n, err := s.store.CountFavoritesByKey(ctx, item.Key); err == nil {
+			v.FavoriteCount = n
+		}
 	}
 	return v
 }

@@ -43,3 +43,27 @@ body {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* 极简播放模式：快进/倍速时只保留进度条与时间（v0.3.0 需求 8）。
+   播放器给 body 加 .reel-minimal，此处隐藏所有带 player-chrome 标记的常驻 UI。 */
+body.reel-minimal .player-chrome {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: opacity 0.18s ease;
+}
+
+/* 沉浸模式：隐藏播放器页面所有常驻 UI，仅保留播放器内部的退出按钮。 */
+body.reel-immersive .player-chrome,
+body.reel-immersive .reel-player-ui {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: opacity 0.22s ease;
+}
+
+/* 移动端 CSS 全屏：播放器根元素铺满视口，横竖屏旋转不重建页面。 */
+html.reel-css-fullscreen-host,
+html.reel-css-fullscreen-host body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}

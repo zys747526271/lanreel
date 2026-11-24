@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ReelSlide from '@/components/reel/ReelSlide.vue'
 import { useFeedStore } from '@/stores/feed'
@@ -8,9 +8,19 @@ import { useFavoritesStore } from '@/stores/favorites'
 import { logger } from '@/lib/logger'
 import { reasonText } from '@/lib/format'
 import { prefs } from '@/lib/prefs'
-import { recordHistory } from '@/lib/history'
 import { loadFeedSession, rememberPlayerRoute, saveFeedSession } from '@/lib/session'
 import { pauseAllVideos } from '@/lib/playerRegistry'
+import {
+  flush as flushProgress,
+  isWatchedThrough,
+  loadProgressMap,
+  progressOf,
+  resumePosition,
+  trackProgress,
+} from '@/lib/progress'
+
+// KeepAlive 按组件名缓存；名称必须与 App.vue 的 KEPT_VIEWS 一致。
+defineOptions({ name: 'FeedView' })
 
 const route = useRoute()
 const router = useRouter()
@@ -21,6 +31,7 @@ const favorites = useFavoritesStore()
 const scroller = ref<HTMLElement | null>(null)
 const activeIndex = ref(0)
 const muted = ref(prefs.defaultMuted)
+const volume = ref(1)
 const imageDuration = ref(5)
 const rate = computed(() => prefs.defaultRate)
 const toast = ref('')
@@ -28,6 +39,7 @@ const routeLoading = ref(true)
 /** 从设置/后台返回时恢复的播放位置 */
 const positions = ref<Record<string, number>>({})
 const pendingResumeTime = ref<number | null>(null)
+const immersive = ref(false)
 let toastTimer: number | null = null
 
 type SlideInstance = InstanceType<typeof ReelSlide>
@@ -38,7 +50,34 @@ function setSlideRef(el: unknown, index: number) {
 }
 const activeSlide = computed(() => slideRefs.get(activeIndex.value))
 const currentItem = computed(() => feed.items[activeIndex.value])
-const favoriteCount = computed(() => favorites.count)
+/** 需求 7：收藏按钮显示当前视频的收藏数，而非全站/本人总数。 */
+const favoriteCount = computed(() => currentItem.value?.favorite_count ?? 0)
+/** 需求 3：播放结束行为来自设备偏好。 */
+const endAction = computed(() => prefs.endAction)
+
+/** 视频信息条显示实际文件夹名；根目录文件显示媒体源名称。 */
+function folderLabel(item: { folder?: string; root_name?: string }) {
+  if (item.folder) return item.folder.split('/').filter(Boolean).pop() ?? item.folder
+  return item.root_name || '根目录'
+}
+
+function setImmersive(on: boolean) {
+  immersive.value = on
+  document.body.classList.toggle('reel-immersive', on)
+}
+function toggleImmersive() {
+  setImmersive(!immersive.value)
+}
+
+function onVolumeChange(payload: { volume: number; muted: boolean }) {
+  volume.value = payload.volume
+  muted.value = payload.muted
+}
+
+function toggleMute() {
+  muted.value = !muted.value
+  if (!muted.value && volume.value <= 0) volume.value = 1
+}
 
 function showToast(message: string) {
   toast.value = message
@@ -69,15 +108,17 @@ function onScroll() {
   }
 }
 
-let historyTimer: number | null = null
-/** 停留在某条超过 1.5 秒才记入观看历史，避免快速滑动污染列表。 */
+/** 停留切换时：把上一条的进度强制上报（历史由服务端按用户隔离，进度即历史来源）。 */
+let lastActiveKey = ''
 function maybeRecordHistory() {
-  if (!auth.isLoggedIn) return
-  if (historyTimer) window.clearTimeout(historyTimer)
-  historyTimer = window.setTimeout(() => {
-    const item = feed.items[activeIndex.value]
-    if (item) void recordHistory(item)
-  }, 1500)
+  const prev = lastActiveKey
+  const now = feed.items[activeIndex.value]?.key ?? ''
+  lastActiveKey = now
+  if (!prev || prev === now || !auth.isLoggedIn) return
+  // 上一条离开时补一次上报，确保切换视频也能留下进度。
+  const item = feed.items.find((i) => i.key === prev)
+  const t = positions.value[prev]
+  if (item && typeof t === 'number') void flushProgress(prev, t, item.duration || 0, item)
 }
 
 function next() {
@@ -136,7 +177,10 @@ function onKeydown(event: KeyboardEvent) {
       break
     case 'm':
     case 'M':
-      muted.value = !muted.value
+      toggleMute()
+      break
+    case 'Escape':
+      if (immersive.value) setImmersive(false)
       break
     default:
       break
@@ -147,16 +191,63 @@ function onKeyup(event: KeyboardEvent) {
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') stopSeek()
 }
 
-function onProgress(payload: { key: string; current: number }) {
+function onProgress(payload: {
+  key: string
+  current: number
+  duration: number
+  started: boolean
+  justStarted: boolean
+  watchedDelta: number
+}) {
   positions.value[payload.key] = payload.current
+  // 只处理真实播放中的条目；预加载邻居的视频不会写历史。
+  if (auth.isLoggedIn && payload.key === feed.items[activeIndex.value]?.key) {
+    trackProgress(payload, feed.items.find((i) => i.key === payload.key))
+  }
+}
+
+/** 随机刷到已看过的视频：默认从头；设置里关闭「从头」时才续播（需求 2）。 */
+function applyRandomStartPolicy(restored: boolean) {
+  // 从设置/后台返回：沿用会话恢复进度，不改。
+  if (restored) return
+  const item = feed.items[activeIndex.value]
+  if (!auth.isLoggedIn || !prefs.randomRestartWatched) {
+    // 未登录没有服务端进度；或用户选择续播：用快照位置续播（看完的仍从头）。
+    if (item) pendingResumeTime.value = resumePosition(item.key) || null
+    return
+  }
+  // 默认策略：从头。
+  pendingResumeTime.value = null
+  if (item && isWatchedThrough(item.key)) positions.value[item.key] = 0
+}
+
+/** 视频自然结束且 endAction=next 时切到下一条；没有下一条就重播，绝不停在黑屏。 */
+function onEnded(_key: string) {
+  if (prefs.endAction !== 'next') return
+  if (activeIndex.value < feed.items.length - 1) {
+    next()
+    return
+  }
+  if (feed.hasMore && !feed.loading) {
+    void feed.loadMore(5).then(() => nextTick(() => {
+      if (activeIndex.value < feed.items.length - 1) next()
+      else activeSlide.value?.replayFromStart()
+    }))
+    return
+  }
+  activeSlide.value?.replayFromStart()
 }
 
 function saveSession() {
   if (routeLoading.value || !feed.items.length) return
   const item = feed.items[activeIndex.value]
-  if (item) {
+  if (item && auth.isLoggedIn) {
     const t = activeSlide.value?.getCurrentTime()
-    if (t != null) positions.value[item.key] = t
+    const dur = item.duration || 0
+    if (t != null) {
+      positions.value[item.key] = t
+      void flushProgress(item.key, t, dur, item)
+    }
   }
   const sessionKey = auth.user ? `u${auth.user.id}` : 'guest'
   saveFeedSession({
@@ -197,15 +288,45 @@ function openList(path: string) {
   router.push(path)
 }
 
-async function refresh() {
+/** 上滑刷新：排除当前整批重新随机，避免媒体库较小时刷到同一条看起来没反应。 */
+let refreshingAt = 0
+async function refresh(fromGesture = false) {
+  if (Date.now() - refreshingAt < 700) return
+  refreshingAt = Date.now()
+  const previousKeys = feed.items.map((i) => i.key)
   feed.reset()
   activeIndex.value = 0
   positions.value = {}
   pendingResumeTime.value = null
-  await feed.loadMore(8)
+  lastActiveKey = ''
+  await feed.loadMore(8, previousKeys)
+  if (fromGesture) showToast('已刷新随机列表')
   await nextTick()
   scrollToIndex(0, false)
+  lastActiveKey = feed.items[0]?.key ?? ''
   maybeRecordHistory()
+}
+
+/* 首页上滑刷新的触摸兜底：控件区域会拦截 pointer 手势，
+   这里在滚动容器层补一套 touch 判定，确保第一条上滑一定能刷新（抖音式）。 */
+let touchStartY = 0
+let touchAt = 0
+function playerIsFullscreen() {
+  return !!document.fullscreenElement || document.documentElement.classList.contains('reel-css-fullscreen-host')
+}
+function onScrollerTouchStart(event: TouchEvent) {
+  if (event.touches.length !== 1 || immersive.value || playerIsFullscreen()) return
+  touchStartY = event.touches[0].clientY
+  touchAt = Date.now()
+}
+function onScrollerTouchEnd(event: TouchEvent) {
+  const startedAt = touchAt
+  touchAt = 0
+  const el = scroller.value
+  if (!startedAt || !el || Date.now() - startedAt > 1500) return
+  if (activeIndex.value !== 0 || el.scrollTop > 20 || immersive.value || playerIsFullscreen()) return
+  const endY = event.changedTouches[0]?.clientY ?? touchStartY
+  if (touchStartY - endY > 60) void refresh(true)
 }
 
 async function loadConfig() {
@@ -227,7 +348,8 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('keyup', onKeyup)
   window.addEventListener('blur', stopSeek)
-  // 注意：刷新由 main.ts 的全局 pagehide → clearAllPlayerSessions 处理；
+  window.addEventListener('resize', onResize)
+  // 注意：刷新由 main.ts 的导航类型判断处理；
   // 这里只负责 SPA 内路由离开时的保存（onBeforeUnmount）。
   rememberPlayerRoute(route.fullPath)
   pauseAllVideos()
@@ -246,13 +368,20 @@ onMounted(async () => {
   }
 
   const tasks: Promise<unknown>[] = [loadConfig()]
-  if (auth.isLoggedIn) tasks.push(favorites.load())
+  if (auth.isLoggedIn) {
+    tasks.push(favorites.load())
+    // 加载服务端进度快照：随机流的「看过从头」判断与列表进度条都依赖它。
+    tasks.push(loadProgressMap())
+  }
   await Promise.all(tasks)
   if (!saved) await feed.loadMore(8)
   if (auth.isLoggedIn) feed.applyFavoriteKeys(favorites.keys)
+  // 随机流策略：仅首次/刷新进入时应用；从设置返回（有 saved）保留原进度恢复。
+  applyRandomStartPolicy(!!saved)
   routeLoading.value = false
   await nextTick()
   scrollToIndex(activeIndex.value, false)
+  lastActiveKey = feed.items[activeIndex.value]?.key ?? ''
   maybeRecordHistory()
   logger.info('app', 'feed', '进入浏览页', {
     guest: !auth.isLoggedIn,
@@ -261,15 +390,49 @@ onMounted(async () => {
   })
 })
 
+/** 横竖屏切换后按当前条目重新对齐滚动位置，避免滑到错误的视频。 */
+let resizeTimer: number | null = null
+function onResize() {
+  if (resizeTimer !== null) window.clearTimeout(resizeTimer)
+  resizeTimer = window.setTimeout(() => {
+    scrollToIndex(activeIndex.value, false)
+    resizeTimer = null
+  }, 120)
+}
+
+/**
+ * KeepAlive 生命周期：切走时暂停并记住是否正在播放；切回时直接复用原播放器续播。
+ * 不再把 sessionStorage 快照当作返回时的恢复手段（快照仅用于整页刷新后的兜底）。
+ */
+let resumeOnActivate = false
+function onViewDeactivated() {
+  resumeOnActivate = !activeSlide.value?.isPaused()
+  setImmersive(false)
+  saveSession()
+  pauseAllVideos()
+}
+function onViewActivated() {
+  rememberPlayerRoute(route.fullPath)
+  void nextTick(() => {
+    scrollToIndex(activeIndex.value, false)
+    if (resumeOnActivate) activeSlide.value?.resume()
+    resumeOnActivate = false
+  })
+}
+onDeactivated(onViewDeactivated)
+onActivated(onViewActivated)
+
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('keyup', onKeyup)
   window.removeEventListener('blur', stopSeek)
+  window.removeEventListener('resize', onResize)
+  if (resizeTimer !== null) window.clearTimeout(resizeTimer)
   stopSeek()
+  setImmersive(false)
   saveSession()
   pauseAllVideos()
   if (toastTimer) window.clearTimeout(toastTimer)
-  if (historyTimer) window.clearTimeout(historyTimer)
 })
 </script>
 
@@ -277,7 +440,7 @@ onBeforeUnmount(() => {
   <div class="fixed inset-0 flex flex-col bg-black text-white">
     <!-- 顶部栏：加大触控区域，移动端常显 -->
     <header
-      class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-3 pt-[max(0.75rem,env(safe-area-inset-top))]"
+      class="player-chrome pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-3 pt-[max(0.75rem,env(safe-area-inset-top))]"
     >
       <div class="pointer-events-auto flex min-w-0 items-center gap-1.5">
         <span class="hidden select-none text-lg font-semibold tracking-tight drop-shadow sm:inline">LanReel</span>
@@ -348,6 +511,8 @@ onBeforeUnmount(() => {
       ref="scroller"
       class="no-scrollbar h-full w-full snap-y snap-mandatory overflow-y-scroll overscroll-none"
       @scroll.passive="onScroll"
+      @touchstart.passive="onScrollerTouchStart"
+      @touchend.passive="onScrollerTouchEnd"
     >
       <section
         v-for="(item, index) in feed.items"
@@ -361,15 +526,23 @@ onBeforeUnmount(() => {
           :preload="Math.abs(index - activeIndex) <= 1"
           :image-duration="imageDuration"
           :muted="muted"
+          :volume="volume"
           :rate="rate"
           :resume-time="index === activeIndex ? pendingResumeTime : null"
+          :end-action="endAction"
+          :immersive="immersive"
+          :allow-refresh="index === 0"
+          @toggle-immersive="toggleImmersive"
+          @refresh="refresh(true)"
+          @volume-change="onVolumeChange"
           @autoplay-muted="showToast('已静音播放，点击画面开启声音')"
           @advance="next"
           @retreat="prev"
           @blocked="onBlocked"
           @toggle-favorite="onToggleFavorite"
-          @toggle-mute="muted = !muted"
+          @toggle-mute="toggleMute"
           @progress="onProgress"
+          @ended="onEnded"
           @player-error="(p) => showToast(p.message)"
         />
       </section>
@@ -402,7 +575,7 @@ onBeforeUnmount(() => {
       <div class="flex gap-2">
         <button
           class="rounded-full bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-white/90"
-          @click="refresh"
+          @click="refresh()"
         >
           重新加载
         </button>
@@ -419,7 +592,7 @@ onBeforeUnmount(() => {
     <!-- 右侧操作栏：上下切换 / 收藏 / 信息（放在控制条上方，避免遮挡） -->
     <div
       v-if="currentItem && !feed.isEmpty"
-      class="absolute bottom-[7.5rem] right-3 z-30 flex flex-col items-center gap-3.5"
+      class="player-chrome absolute bottom-[7.5rem] right-3 z-30 flex flex-col items-center gap-3.5"
     >
       <button class="flex flex-col items-center gap-0.5" title="上一个（↑）" @click="prev">
         <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70 active:scale-90">
@@ -465,7 +638,7 @@ onBeforeUnmount(() => {
     <router-link
       v-if="currentItem && !feed.isEmpty"
       :to="auth.isLoggedIn ? '/settings' : '/login'"
-      class="absolute left-3 top-[42%] z-30 flex flex-col items-center gap-0.5"
+      class="player-chrome absolute left-3 top-[42%] z-30 flex flex-col items-center gap-0.5"
       title="信息 / 设置"
     >
       <span class="flex h-10 w-10 items-center justify-center rounded-full border border-white/20 bg-black/50 backdrop-blur transition hover:bg-black/70 active:scale-90">
@@ -480,13 +653,13 @@ onBeforeUnmount(() => {
     <!-- 信息条：抬高到控制条上方 -->
     <div
       v-if="currentItem"
-      class="pointer-events-none absolute bottom-[6.2rem] left-4 z-20 max-w-[60%] space-y-0.5"
+      class="player-chrome pointer-events-none absolute bottom-[6.2rem] left-4 z-20 max-w-[60%] space-y-0.5"
     >
       <p class="truncate text-sm font-medium text-white/95 drop-shadow">
         {{ currentItem.rel_path.split('/').pop() }}
       </p>
       <p class="truncate text-[11px] text-white/65 drop-shadow">
-        {{ currentItem.folder || '根目录' }} · {{ currentItem.media_type === 'video' ? '视频' : '图片' }}
+        {{ folderLabel(currentItem) }} · {{ currentItem.media_type === 'video' ? '视频' : '图片' }}
       </p>
       <p v-if="!currentItem.playable" class="text-[11px] text-amber-300/90">
         {{ reasonText(currentItem.reason) }}

@@ -34,10 +34,76 @@ export interface MediaItem {
   playable: boolean
   reason?: string
   favorite: boolean
+  /** 当前视频被收藏的次数（v0.3.0，非全站总数） */
+  favorite_count?: number
+  /** 观看进度 0~1（v0.3.0，收藏/历史网格显示进度条） */
+  watchProgress?: number
   stream_url: string
   thumb_url: string
   /** 前端本地唯一标识（同一条目可能重复出现） */
   uid?: string
+}
+
+/** 单条观看进度（v0.3.0）。 */
+export interface ProgressView {
+  position: number
+  duration: number
+  progress: number
+  completed: boolean
+  play_count: number
+  /** 累计真实观看时长（拖动进度条不计） */
+  watched_seconds: number
+}
+
+/** 服务端观看历史条目（按用户隔离，v0.3.0）。 */
+export interface HistoryEntryView {
+  key: string
+  media_type: MediaType
+  rel_path: string
+  root_index: number
+  root_name: string
+  folder: string
+  duration: number
+  position: number
+  progress: number
+  play_count: number
+  completed: boolean
+  playable: boolean
+  reason?: string
+  stream_url: string
+  thumb_url: string
+  last_played_at: string
+  favorite_count: number
+}
+
+/** 用户观看汇总（v0.3.0）。 */
+export interface WatchSummary {
+  watched_videos: number
+  completed_videos: number
+  total_watch_time: number
+}
+
+/** 今日全站观看汇总（不统计完播数） */
+export interface DailyWatchSummary {
+  watched_videos: number
+  total_watch_time: number
+}
+
+/** 视频/文件夹热度（v0.3.0）。 */
+export interface HeatView {
+  key?: string
+  rel_path?: string
+  folder: string
+  root_index: number
+  root_name?: string
+  media_type?: string
+  play_count: number
+  completed_count: number
+  watched_seconds: number
+  favorite_count: number
+  last_played_at?: string
+  heat_score: number
+  media_count?: number
 }
 
 export interface PublicConfig {
@@ -66,11 +132,20 @@ export interface FolderPolicyView {
   schedule_type: ScheduleType
   time_start: string
   time_end: string
+  /** 游客独立播放时段（v0.3.0） */
+  guest_schedule_type: ScheduleType
+  guest_time_start: string
+  guest_time_end: string
   configured: boolean
   inherited: boolean
   inherited_from: string
   inherited_root: number
   updated_at?: string
+  /** 热度统计（v0.3.0） */
+  play_count: number
+  watched_seconds: number
+  favorite_count: number
+  recursive: boolean
 }
 
 export interface FileOverride {
@@ -81,6 +156,9 @@ export interface FileOverride {
   schedule_type: ScheduleType
   time_start: string
   time_end: string
+  guest_schedule_type: ScheduleType
+  guest_time_start: string
+  guest_time_end: string
   note: string
   updated_at: string
 }
@@ -156,11 +234,22 @@ export interface AdminStats {
   log_counts: Record<string, number>
   registration_open: boolean
   logging: LoggingSettings
+  /** 历史全站观看与时长 */
+  watch_summary: WatchSummary
+  /** 今日全站观看与时长 */
+  today_watch_summary: DailyWatchSummary
 }
 
 /** 媒体目录设置（后台可热更新，CR-003）。 */
+export interface RootSetting {
+  path: string
+  recursive: boolean
+}
+
 export interface MediaSettings {
   roots: string[]
+  /** 每个根的递归选项（v0.3.0） */
+  root_settings: RootSetting[]
   /** database=后台设置优先，config=使用配置文件 media.roots */
   source: 'database' | 'config'
   config_roots: string[]

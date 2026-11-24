@@ -297,6 +297,27 @@ func (h *Handlers) handleAdminPurgeLogs(c *gin.Context) {
 	ok(c, gin.H{"removed": n})
 }
 
+// handleAdminReset POST /api/v1/admin/reset
+// 恢复初始化：必须显式输入「确认初始化」，清空业务数据并回到首次部署状态。
+func (h *Handlers) handleAdminReset(c *gin.Context) {
+	var req struct {
+		Confirmation string `json:"confirmation" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "请求体格式错误")
+		return
+	}
+	if strings.TrimSpace(req.Confirmation) != "确认初始化" {
+		fail(c, http.StatusBadRequest, "invalid_confirmation", "请输入「确认初始化」")
+		return
+	}
+	if err := h.admin.ResetToInitial(c.Request.Context()); err != nil {
+		failService(c, err)
+		return
+	}
+	ok(c, gin.H{"success": true})
+}
+
 // ---------- 设置 ----------
 
 // handleGetLoggingSettings GET /api/v1/admin/settings/logging

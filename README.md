@@ -2,9 +2,9 @@
 
 局域网随机视频流媒体系统：部署在 Windows / Linux（含 NAS）主机上，用浏览器以抖音式竖屏滑动方式浏览指定文件夹里的视频与图片，支持注册登录、跨设备收藏同步与管理员后台。
 
-**当前版本：v0.2.1（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
+**当前版本：v0.3.0（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
 
-下载：见 [Releases](https://github.com/zys747526271/lanreel/releases)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.2.1.md](./docs/releases/v0.2.1.md)。
+下载：见 [Releases](https://github.com/zys747526271/lanreel/releases)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.3.0.md](./docs/releases/v0.3.0.md)。
 
 <p>
   <img src="./docs/screenshots/setup-admin.png" width="240" alt="首次部署：创建管理员" />
@@ -21,9 +21,11 @@
 - 图片按配置时长（默认 5 秒）自动切换，底部有停留进度提示
 - 视频支持拖拽进度、HTTP Range 断点续播，缓存头 `public, max-age=86400`
 - 收藏夹独立成页（缩略图网格），与随机流分离，一屏一媒体、切换零刷新
-- 长按画面进入倍速模式（上下滑动调 0.5×~3×），单击倍速提示按钮即可恢复 1×
+- 长按画面进入倍速模式（默认 1.5×，上下滑动调 0.5×~3×，松手保持；参考 Kazumi 手势），单击底部提示恢复原速
 - 每条播放器带全屏按钮，视频/图片按原始比例显示（黑边填充，不拉伸）
+- 快进/倍速时只保留底部进度条与时间，其余 UI 自动隐藏
 - 从设置 / 后台返回会回到进入前的视频与播放进度，不会退回第一条
+- 播放结束可选暂停 / 循环 / 自动下一个；观看进度按账号云端同步，历史/收藏打开自动续播并可「从头开始」
 
 **内容管控**
 - 管理员可对文件夹、单文件分别设置「可播 / 禁用 / 时间窗口（支持跨零点）」
@@ -33,12 +35,14 @@
 
 **账号与收藏**
 - 注册（受管理员开关控制）、JWT 登录、令牌自动刷新、登出清缓存
-- 收藏以「媒体源 + 相对路径」哈希标识，迁移文件夹不失效；服务端为准，跨设备即时同步
-- 前端用 IndexedDB 缓存收藏，断网时展示缓存并标记「离线」
+- 观看历史与播放进度按账号隔离，管理员与每个普通用户互不干扰
+- 收藏以「媒体源 + 相对路径」哈希标识，迁移文件夹不失效；服务端为准，跨设备即时同步；按钮显示的是该视频的收藏数
+- 前端用 IndexedDB 缓存收藏，断网时展示缓存并标记「离线」；观看统计（视频数/完播数/时长）与热度排行可在设置页和管理端查看
 
 **账号与可见性**
 - 未登录即游客：直接输入 IP 就能看管理员开放的内容；登录后可见范围更大、可收藏
-- 每个文件夹/文件策略分别设置「普通用户可见」与「游客可见」，时间窗口共用；策略按媒体根隔离，多根下同名目录互不影响
+- 每个文件夹/文件策略分别设置「普通用户可见」与「游客可见」，且两者播放时段各自独立；策略按媒体根隔离，多根下同名目录互不影响
+- 添加媒体目录可选递归导入子目录；文件夹策略以树形管理（根可折叠子目录），根目录策略可一键同步到所有子目录
 - 登录失败按 IP + 用户名双维度限流，超限返回 429 并记录告警
 
 **可诊断性**
@@ -51,7 +55,7 @@
 - 首次部署在浏览器内创建管理员，之后每次启动直接进主页（无浏览器可用 `ADMIN_INIT_PASSWORD` 预置）
 - 媒体目录可在后台「媒体目录」增删（内置目录浏览器），保存后立即热重扫，无需改配置或重启
 - 文件监听：目录内容变化 2 秒去抖后自动扫描（定时扫描仍作为兜底）
-- 服务端缩略图：图片由服务端缩放，视频用 ffmpeg 抽帧；无 ffmpeg 时收藏夹/历史悬停快速跳播抽帧并缓存封面
+- 封面由浏览器抽帧：收藏夹/历史页自动抽首帧并缓存到 IndexedDB，悬停分段跳播预览整段视频（服务端不再生成缩略图、无需 ffmpeg）
 - 不做服务端转码、不缓存媒体本体；空闲内存实测 ~28MB
 - `GOMEMLIMIT` / `GOMAXPROCS` 通过环境变量注入，便于与前台游戏共存
 
@@ -165,9 +169,6 @@ cd web && npx vue-tsc --noEmit
 | 配置 | 说明 | 默认 |
 |------|------|------|
 | `media.roots` | 媒体根目录（可多个）；后台「媒体目录」保存后会覆盖此项 | `./media` |
-| `media.thumbnail_enabled` | 是否生成缩略图 | `true` |
-| `media.thumbnail_width` | 缩略图宽度（像素），高度按比例 | `480` |
-| `media.ffmpeg_path` | ffmpeg 路径；留空在 PATH 与程序目录查找（缺失时跳过视频缩略图） | 空 |
 | `media.watch_enabled` | 是否启用文件系统监听 | `true` |
 | `media.watch_max_dirs` | 监听目录上限，超过则退回定时扫描 | `4096` |
 | `auth.login_max_attempts` | 登录失败次数上限（窗口内） | `5` |
@@ -195,13 +196,14 @@ cd web && npx vue-tsc --noEmit
 | 认证 | `POST /auth/refresh`、`POST /auth/logout`、`GET /auth/me` |
 | 媒体 | `GET /media/random?limit=&exclude=&mode=`、`POST /media/status`（批量刷新条目实时权限，v0.2.1 新增）、`GET /media/:key/stream`、`GET /media/:key/thumb`（均支持游客，带失效令牌返回 401） |
 | 收藏 | `GET /favorites`、`POST /favorites`、`DELETE /favorites/:key` |
+| 观看历史/进度 | `GET/DELETE /history`、`DELETE /history/:key`、`GET/POST /progress`、`POST /progress/restart`、`GET /me/watch-summary`（均按用户隔离，v0.3.0） |
 | 日志 | `POST /logs/client`（前端日志上报，默认关闭） |
 
-### 管理接口（需 `role=admin`，共 28 个）
+### 管理接口（需 `role=admin`，共 30 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/admin/stats` | 概览统计（媒体、用户、收藏、策略、扫描、日志分布） |
+| GET | `/admin/stats` | 概览统计（媒体、用户、收藏、策略、扫描、日志分布、全站观看汇总） |
 | POST | `/admin/scan` | 立即触发媒体重扫 |
 | GET | `/admin/folders` | 文件夹列表（含策略生效状态与继承来源） |
 | PUT | `/admin/folders` | 设置文件夹策略 |
@@ -224,8 +226,10 @@ cd web && npx vue-tsc --noEmit
 | PUT | `/admin/settings/media` | 保存媒体目录并触发后台重扫（目录须存在） |
 | DELETE | `/admin/settings/media` | 清除后台设置，回落到配置文件 `media.roots` |
 | GET | `/admin/fs/dirs?path=` | 目录浏览器（`path` 为空列根/盘符，仅返回子目录） |
-| GET | `/admin/thumbs/stats` | 缩略图覆盖率、ffmpeg 状态与队列统计 |
-| POST | `/admin/thumbs/rebuild` | 重新生成全部缩略图（后台顺序执行） |
+| GET | `/admin/watch/heat/media?limit=` | 媒体热度排行（播放/观看/收藏/完播，v0.3.0） |
+| GET | `/admin/watch/heat/folders?limit=` | 文件夹热度排行 |
+| GET | `/admin/watch/heat/users?limit=` | 用户观看排行 |
+| GET | `/admin/recommend?limit=&exclude=` | 推荐候选（预留接口，当前按热度分返回，v0.3.0） |
 | GET | `/admin/settings/logging` | 读取日志配置 |
 | PUT | `/admin/settings/logging` | 更新保留天数、最大条数、级别、上报开关 |
 | PUT | `/admin/settings/registration` | 开关普通用户注册 |
@@ -257,7 +261,7 @@ cd web && npx vue-tsc --noEmit
 - 管理员接口额外校验 `role=admin`，越权与写操作均留痕
 - 局域网自签 HTTPS 即可；若要暴露公网，请走反向代理 + Let's Encrypt，不要直接开放端口
 
-## 验证情况（v0.2.1）
+## 验证情况（v0.3.0）
 
 - `go vet ./...` 无告警；`go test ./...`（media / policy / config）全部通过
 - 用 3 个样本媒体（1 视频 2 图片）实测：注册登录、随机流、视频自动播放、图片 5 秒切换、
@@ -266,6 +270,7 @@ cd web && npx vue-tsc --noEmit
 - 浏览器（Edge headless）端到端脚本跑完整流程，控制台零报错；390×844 / 430×932 / 1440×900 三档布局无重叠
 - v0.2.0 交互实测：设置页往返进度恢复、全屏比例、空格暂停、长按方向键快进、鼠标拖动切视频、长按倍速与点击退出、悬停抽帧封面、收藏/历史互切
 - v0.2.1 修复实测：历史无权限条目高强度高斯模糊 + 居中原因提示；长按默认 1.5×，上滑变 2×，松手面板消失但保持 2×，点击底部提示回 1×
+- v0.3.0 实测：历史按账号隔离（user1 有记录 / owner 为空）、每用户进度云端同步与续播、从头开始清零、播放次数准确（=1）、文件夹热度实时聚合、极简快进 UI 与时间 HUD、三档热度排行与推荐接口、播放时段用户/游客独立
 - 空闲内存 28MB（低于 N-01 的 50MB 目标）
 
 ## 文档
@@ -278,6 +283,7 @@ cd web && npx vue-tsc --noEmit
 | [docs/requirements/completed/v0.1.0.md](./docs/requirements/completed/v0.1.0.md) | 逐条需求完成情况（含实现位置与验证方式） |
 | [docs/releases/v0.2.0.md](./docs/releases/v0.2.0.md) | v0.2.0 发布说明 |
 | [docs/releases/v0.2.1.md](./docs/releases/v0.2.1.md) | v0.2.1 发布说明（修复版） |
+| [docs/releases/v0.3.0.md](./docs/releases/v0.3.0.md) | v0.3.0 发布说明（账号隔离/进度/统计/策略） |
 | [docs/requirements/backlog/v0.1.0.md](./docs/requirements/backlog/v0.1.0.md) | 遗留项、技术债与下版规划 |
 | [docs/requirements/changes/](./docs/requirements/changes/) | 需求变更记录（CR） |
 | [deploy/README.md](./deploy/README.md) | 部署、HTTPS、资源限制与排障 |
@@ -286,7 +292,8 @@ cd web && npx vue-tsc --noEmit
 
 - **v0.1.0**：Web 端完整可用，后台可管控，日志可诊断
 - **v0.2.0**：手势倍速、全屏按钮、鼠标/键盘控制、会话进度恢复、观看历史独立页、悬停抽帧封面
-- **v0.2.1（当前）**：历史实时权限遮挡、Kazumi 式长按倍速（默认 1.5×、松手保持）
+- **v0.2.1**：历史实时权限遮挡、Kazumi 式长按倍速（默认 1.5×、松手保持）
+- **v0.3.0（当前）**：历史按账号隔离、每用户进度续播与统计、播放结束行为、极简快进 UI、用户/游客独立时段、文件夹递归导入与热度排行、推荐接口预留
 - **更远**：PC 端 Tauri 套壳、手机 / 电视端客户端、多实例部署与 PostgreSQL 适配、日志远程聚合
 
 具体条目与前置条件见 [backlog](./docs/requirements/backlog/v0.1.0.md)。

@@ -8,20 +8,18 @@ import {
   NInput,
   NModal,
   NSpin,
+  NSwitch,
   NTag,
   useMessage,
 } from 'naive-ui'
 import {
   getMediaSettings,
-  getThumbStats,
   listDirs,
-  rebuildThumbs,
   resetMediaRoots,
   setMediaRoots,
   triggerScan,
 } from '@/api/admin'
-import type { ThumbStatsPayload } from '@/api/admin'
-import type { DirListing, MediaSettings } from '@/api/types'
+import type { DirListing, MediaSettings, RootSetting } from '@/api/types'
 
 const message = useMessage()
 
@@ -30,8 +28,10 @@ const saving = ref(false)
 const resetting = ref(false)
 const scanning = ref(false)
 const settings = ref<MediaSettings | null>(null)
-/** 编辑中的目录列表（保存前不影响运行） */
-const draft = ref<string[]>([])
+/** 编辑中的目录列表（保存前不影响运行）。v0.3.0：每项带递归标志。 */
+const draft = ref<RootSetting[]>([])
+/** 添加新目录时是否递归导入子目录（需求 10）。 */
+const newRecursive = ref(true)
 const newPath = ref('')
 
 const pickerOpen = ref(false)
@@ -39,50 +39,11 @@ const pickerLoading = ref(false)
 const listing = ref<DirListing | null>(null)
 
 let pollTimer: number | undefined
-const thumbStats = ref<ThumbStatsPayload | null>(null)
-const rebuilding = ref(false)
-let thumbTimer: number | undefined
-
-async function loadThumbs() {
-  try {
-    thumbStats.value = (await getThumbStats()).data
-  } catch {
-    thumbStats.value = null
-  }
-}
-
-async function rebuild() {
-  rebuilding.value = true
-  try {
-    const res = await rebuildThumbs()
-    message.success(`已开始重新生成 ${res.data.queued} 个缩略图`)
-    stopThumbPoll()
-    thumbTimer = window.setInterval(async () => {
-      await loadThumbs()
-      const s = thumbStats.value
-      if (!s) return
-      const done = s.video_thumbs + s.image_thumbs
-      if (done >= s.videos + s.images) {
-        stopThumbPoll()
-        rebuilding.value = false
-      }
-    }, 1500)
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : '重建失败')
-    rebuilding.value = false
-  }
-}
-
-function stopThumbPoll() {
-  if (thumbTimer !== undefined) {
-    window.clearInterval(thumbTimer)
-    thumbTimer = undefined
-  }
-}
 
 const dirty = computed(() => {
   if (!settings.value) return false
-  return JSON.stringify(draft.value) !== JSON.stringify(settings.value.roots)
+  return JSON.stringify(draft.value.map((d) => ({ path: d.path, recursive: d.recursive })))
+    !== JSON.stringify(settings.value.root_settings.map((d) => ({ path: d.path, recursive: d.recursive })))
 })
 
 const busy = computed(() => saving.value || resetting.value || !!settings.value?.scanning)
@@ -99,7 +60,8 @@ async function load() {
   try {
     const s = (await getMediaSettings()).data
     settings.value = s
-    draft.value = [...s.roots]
+    draft.value = (s.root_settings?.length ? s.root_settings : s.roots.map((path) => ({ path, recursive: true })))
+      .map((r) => ({ ...r }))
     if (s.scanning) schedulePoll()
   } catch (err) {
     message.error(err instanceof Error ? err.message : '加载媒体目录失败')
@@ -137,7 +99,6 @@ function schedulePoll() {
 
 function normalizeInput(v: string) {
   let p = v.trim()
-  // 保留盘符根（如 C:\），其余去掉结尾分隔符
   if (p.length > 3) p = p.replace(/[\\/]+$/, '')
   return p
 }
@@ -145,11 +106,11 @@ function normalizeInput(v: string) {
 function addPath(p?: string) {
   const v = normalizeInput(p ?? newPath.value)
   if (!v) return
-  if (draft.value.some((x) => x.toLowerCase() === v.toLowerCase())) {
+  if (draft.value.some((x) => x.path.toLowerCase() === v.toLowerCase())) {
     message.warning('该目录已在列表中')
     return
   }
-  draft.value = [...draft.value, v]
+  draft.value = [...draft.value, { path: v, recursive: newRecursive.value }]
   newPath.value = ''
 }
 
@@ -157,8 +118,16 @@ function removePath(idx: number) {
   draft.value = draft.value.filter((_, i) => i !== idx)
 }
 
+function toggleRecursive(idx: number) {
+  draft.value = draft.value.map((r, i) => (i === idx ? { ...r, recursive: !r.recursive } : r))
+}
+
 function revertDraft() {
-  if (settings.value) draft.value = [...settings.value.roots]
+  if (settings.value) {
+    draft.value = (settings.value.root_settings?.length
+      ? settings.value.root_settings
+      : settings.value.roots.map((path) => ({ path, recursive: true }))).map((r) => ({ ...r }))
+  }
 }
 
 async function save() {
@@ -168,9 +137,10 @@ async function save() {
   }
   saving.value = true
   try {
-    const s = (await setMediaRoots(draft.value)).data
+    const s = (await setMediaRoots(draft.value.map((d) => ({ path: d.path, recursive: d.recursive })))).data
     settings.value = s
-    draft.value = [...s.roots]
+    draft.value = (s.root_settings?.length ? s.root_settings : s.roots.map((path) => ({ path, recursive: true })))
+      .map((r) => ({ ...r }))
     message.success('已保存，正在后台扫描')
     schedulePoll()
   } catch (err) {
@@ -185,7 +155,8 @@ async function resetToConfig() {
   try {
     const s = (await resetMediaRoots()).data
     settings.value = s
-    draft.value = [...s.roots]
+    draft.value = (s.root_settings?.length ? s.root_settings : s.roots.map((path) => ({ path, recursive: true })))
+      .map((r) => ({ ...r }))
     message.success('已恢复为配置文件中的目录')
     schedulePoll()
   } catch (err) {
@@ -231,13 +202,8 @@ function chooseCurrent() {
   pickerOpen.value = false
 }
 
-onMounted(async () => {
-  await Promise.all([load(), loadThumbs()])
-})
-onBeforeUnmount(() => {
-  stopPoll()
-  stopThumbPoll()
-})
+onMounted(load)
+onBeforeUnmount(stopPoll)
 </script>
 
 <template>
@@ -252,31 +218,37 @@ onBeforeUnmount(() => {
 
         <div class="space-y-3">
           <p class="text-xs leading-relaxed text-slate-500">
-            这里配置「想看哪些文件夹」。只能填服务器本机的目录，保存后立即重新扫描；
-            视频与图片会按文件扩展名识别，子目录自动递归。
+            这里配置「想看哪些文件夹」。只能填服务器本机的目录，保存后立即重新扫描；视频与图片按扩展名识别。
+            每个目录可单独选择是否<strong class="text-slate-700">递归导入子目录</strong>：开启后，有媒体文件的子文件夹会独立出现在「文件夹策略」中，可分别管理（需求 10）。
           </p>
 
           <div v-if="draft.length" class="space-y-2">
             <div
-              v-for="(p, idx) in draft"
-              :key="p"
-              class="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+              v-for="(r, idx) in draft"
+              :key="r.path"
+              class="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
             >
               <span class="w-5 shrink-0 text-center text-[11px] text-slate-400">{{ idx + 1 }}</span>
-              <code class="min-w-0 flex-1 break-all text-xs text-slate-700">{{ p }}</code>
+              <code class="min-w-0 flex-1 break-all text-xs text-slate-700">{{ r.path }}</code>
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] text-slate-500">递归子目录</span>
+                <n-switch :value="r.recursive" size="small" @update:value="toggleRecursive(idx)" />
+              </div>
               <n-button size="tiny" quaternary type="error" @click="removePath(idx)">移除</n-button>
             </div>
           </div>
           <n-empty v-else description="还没有目录，添加一个包含视频或图片的文件夹" size="small" />
 
-          <div class="flex flex-col gap-2 sm:flex-row">
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
             <n-input
               v-model:value="newPath"
               size="small"
               placeholder="例如 D:\Videos 或 /mnt/media"
               @keyup.enter="addPath()"
             />
-            <div class="flex gap-2">
+            <div class="flex items-center gap-2">
+              <span class="whitespace-nowrap text-[11px] text-slate-500">递归</span>
+              <n-switch v-model:value="newRecursive" size="small" />
               <n-button size="small" @click="openPicker">浏览…</n-button>
               <n-button size="small" type="primary" secondary @click="addPath()">添加</n-button>
             </div>
@@ -347,29 +319,6 @@ onBeforeUnmount(() => {
             {{ settings?.scanning ? '扫描中…' : '立即扫描' }}
           </n-button>
         </div>
-      </n-card>
-      <n-card class="lg:col-span-3" title="缩略图" size="small">
-        <div class="flex flex-wrap items-center justify-between gap-4 text-sm">
-          <div class="grid grid-cols-2 gap-x-8 gap-y-1 text-xs text-slate-500 sm:grid-cols-4">
-            <span>视频 {{ thumbStats?.video_thumbs ?? 0 }} / {{ thumbStats?.videos ?? 0 }}</span>
-            <span>图片 {{ thumbStats?.image_thumbs ?? 0 }} / {{ thumbStats?.images ?? 0 }}</span>
-            <span>
-              ffmpeg：
-              <span :class="thumbStats?.stats.ffmpeg_available ? 'text-emerald-600' : 'text-amber-600'">
-                {{ thumbStats?.stats.ffmpeg_available ? '已检测到' : '未安装（视频缩略图跳过）' }}
-              </span>
-            </span>
-            <span>本次生成 {{ thumbStats?.stats.generated ?? 0 }} · 失败 {{ thumbStats?.stats.failed ?? 0 }}</span>
-          </div>
-          <div class="flex gap-2">
-            <n-button size="small" :loading="rebuilding" @click="rebuild">重新生成</n-button>
-            <n-button size="small" quaternary @click="loadThumbs">刷新</n-button>
-          </div>
-        </div>
-        <p class="mt-2 text-[11px] leading-relaxed text-slate-400">
-          图片缩略图由服务端直接缩放；视频缩略图需要 ffmpeg（可配置 media.ffmpeg_path，或把 ffmpeg 加入 PATH）。
-          未安装 ffmpeg 时视频仍可播放，只是收藏夹与列表使用占位图。
-        </p>
       </n-card>
     </div>
 

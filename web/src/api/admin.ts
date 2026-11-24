@@ -23,13 +23,25 @@ export function triggerScan() {
   return request<{ data: { media_total: number } }>('/admin/scan', { method: 'POST' })
 }
 
+/** 恢复初始化：清空业务数据并回到首次部署状态。 */
+export function resetToInitial(confirmation: string) {
+  return request<{ data: { success: boolean } }>('/admin/reset', {
+    method: 'POST',
+    body: { confirmation },
+  })
+}
+
 // ---------- 媒体目录 ----------
 export function getMediaSettings() {
   return request<{ data: MediaSettings }>('/admin/settings/media')
 }
 
-export function setMediaRoots(roots: string[]) {
-  return request<{ data: MediaSettings }>('/admin/settings/media', { method: 'PUT', body: { roots } })
+/** 保存媒体目录；每个根可单独设置是否递归导入子目录（v0.3.0 需求 10）。 */
+export function setMediaRoots(roots: Array<{ path: string; recursive: boolean }>) {
+  return request<{ data: MediaSettings }>('/admin/settings/media', {
+    method: 'PUT',
+    body: { roots: roots.map((r) => r.path), root_inputs: roots },
+  })
 }
 
 export function resetMediaRoots() {
@@ -40,30 +52,6 @@ export function resetMediaRoots() {
 export function listDirs(path = '') {
   const q = path ? `?path=${encodeURIComponent(path)}` : ''
   return request<{ data: DirListing }>(`/admin/fs/dirs${q}`)
-}
-
-// ---------- 缩略图 ----------
-export interface ThumbStatsPayload {
-  stats: {
-    enabled: boolean
-    ffmpeg_available: boolean
-    ffmpeg_path?: string
-    generated: number
-    failed: number
-    queued: number
-  }
-  videos: number
-  images: number
-  video_thumbs: number
-  image_thumbs: number
-}
-
-export function getThumbStats() {
-  return request<{ data: ThumbStatsPayload }>('/admin/thumbs/stats')
-}
-
-export function rebuildThumbs() {
-  return request<{ data: { queued: number } }>('/admin/thumbs/rebuild', { method: 'POST' })
 }
 
 // ---------- 文件夹策略 ----------
@@ -79,6 +67,12 @@ export function setFolderPolicy(payload: {
   schedule_type: ScheduleType
   time_start?: string
   time_end?: string
+  /** 游客独立时段（v0.3.0 需求 9） */
+  guest_schedule_type?: ScheduleType
+  guest_time_start?: string
+  guest_time_end?: string
+  /** 根目录策略一键同步到所有子文件夹（v0.3.0 需求 10） */
+  sync_children?: boolean
 }) {
   return request<{ data: FolderPolicyView }>('/admin/folders', { method: 'PUT', body: payload })
 }
@@ -108,6 +102,10 @@ export function setFileOverride(
     schedule_type: ScheduleType
     time_start?: string
     time_end?: string
+    /** 游客独立时段（v0.3.0 需求 9） */
+    guest_schedule_type?: ScheduleType
+    guest_time_start?: string
+    guest_time_end?: string
     note?: string
   },
 ) {

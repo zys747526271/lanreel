@@ -38,8 +38,16 @@ const form = ref<{
   schedule_type: ScheduleType
   time_start: string
   time_end: string
+  guest_schedule_type: ScheduleType
+  guest_time_start: string
+  guest_time_end: string
   note: string
-}>({ enabled: true, guest_enabled: true, schedule_type: 'always', time_start: '18:00', time_end: '23:00', note: '' })
+}>({
+  enabled: true, guest_enabled: true,
+  schedule_type: 'always', time_start: '18:00', time_end: '23:00',
+  guest_schedule_type: 'always', guest_time_start: '18:00', guest_time_end: '23:00',
+  note: '',
+})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -89,6 +97,9 @@ function openEdit(file: FileView) {
     schedule_type: o?.schedule_type ?? 'always',
     time_start: o?.time_start || '18:00',
     time_end: o?.time_end || '23:00',
+    guest_schedule_type: o?.guest_schedule_type ?? 'always',
+    guest_time_start: o?.guest_time_start || '18:00',
+    guest_time_end: o?.guest_time_end || '23:00',
     note: o?.note ?? '',
   }
   showModal.value = true
@@ -97,7 +108,11 @@ function openEdit(file: FileView) {
 async function save() {
   if (!current.value) return
   if (form.value.schedule_type === 'time_window' && (!form.value.time_start || !form.value.time_end)) {
-    message.warning('请填写时间窗口的起止时间')
+    message.warning('请填写普通用户时间窗口的起止时间')
+    return
+  }
+  if (form.value.guest_schedule_type === 'time_window' && (!form.value.guest_time_start || !form.value.guest_time_end)) {
+    message.warning('请填写游客时间窗口的起止时间')
     return
   }
   saving.value = true
@@ -105,9 +120,12 @@ async function save() {
     await setFileOverride(current.value.key, {
       enabled: form.value.enabled,
       guest_enabled: form.value.guest_enabled,
-      schedule_type: form.value.enabled || form.value.guest_enabled ? form.value.schedule_type : 'disabled',
+      schedule_type: form.value.enabled ? form.value.schedule_type : 'disabled',
       time_start: form.value.time_start,
       time_end: form.value.time_end,
+      guest_schedule_type: form.value.guest_enabled ? form.value.guest_schedule_type : 'disabled',
+      guest_time_start: form.value.guest_time_start,
+      guest_time_end: form.value.guest_time_end,
       note: form.value.note,
     })
     message.success('文件策略已保存')
@@ -275,25 +293,41 @@ onMounted(async () => {
           <n-switch v-model:value="form.guest_enabled" />
         </div>
 
-        <div v-if="form.enabled || form.guest_enabled">
-          <p class="mb-2 text-xs text-slate-500">播放时段（两个受众共用）</p>
-          <n-radio-group v-model:value="form.schedule_type">
+        <!-- 普通用户时段 -->
+        <div v-if="form.enabled" class="rounded-lg border border-slate-200 p-3">
+          <p class="mb-2 text-xs text-slate-500">普通用户播放时段</p>
+          <n-radio-group v-model:value="form.schedule_type" size="small">
             <n-radio-button value="always">始终可播</n-radio-button>
             <n-radio-button value="time_window">时间窗口</n-radio-button>
           </n-radio-group>
+          <div v-if="form.schedule_type === 'time_window'" class="mt-2 grid grid-cols-2 gap-3">
+            <div>
+              <p class="mb-1 text-xs text-slate-500">开始 HH:MM</p>
+              <n-input v-model:value="form.time_start" placeholder="18:00" />
+            </div>
+            <div>
+              <p class="mb-1 text-xs text-slate-500">结束 HH:MM</p>
+              <n-input v-model:value="form.time_end" placeholder="23:00" />
+            </div>
+          </div>
         </div>
 
-        <div
-          v-if="(form.enabled || form.guest_enabled) && form.schedule_type === 'time_window'"
-          class="grid grid-cols-2 gap-3"
-        >
-          <div>
-            <p class="mb-1 text-xs text-slate-500">开始时间</p>
-            <n-input v-model:value="form.time_start" placeholder="18:00" />
-          </div>
-          <div>
-            <p class="mb-1 text-xs text-slate-500">结束时间</p>
-            <n-input v-model:value="form.time_end" placeholder="23:00" />
+        <!-- 游客时段（独立） -->
+        <div v-if="form.guest_enabled" class="rounded-lg border border-slate-200 p-3">
+          <p class="mb-2 text-xs text-slate-500">游客播放时段（与普通用户独立）</p>
+          <n-radio-group v-model:value="form.guest_schedule_type" size="small">
+            <n-radio-button value="always">始终可播</n-radio-button>
+            <n-radio-button value="time_window">时间窗口</n-radio-button>
+          </n-radio-group>
+          <div v-if="form.guest_schedule_type === 'time_window'" class="mt-2 grid grid-cols-2 gap-3">
+            <div>
+              <p class="mb-1 text-xs text-slate-500">开始 HH:MM</p>
+              <n-input v-model:value="form.guest_time_start" placeholder="18:00" />
+            </div>
+            <div>
+              <p class="mb-1 text-xs text-slate-500">结束 HH:MM</p>
+              <n-input v-model:value="form.guest_time_end" placeholder="23:00" />
+            </div>
           </div>
         </div>
 

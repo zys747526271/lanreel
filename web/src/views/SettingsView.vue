@@ -6,10 +6,14 @@ import { useFavoritesStore } from '@/stores/favorites'
 import { logger, type LogRecord } from '@/lib/logger'
 import { countAll, clearStore } from '@/lib/db'
 import { fetchPublicConfig, withToken } from '@/api/client'
-import { formatTime } from '@/lib/format'
-import { RATE_OPTIONS, prefs, resetPrefs, type PlaybackRate } from '@/lib/prefs'
-import type { PublicConfig } from '@/api/types'
+import { formatTime, formatDuration } from '@/lib/format'
+import {
+  RATE_OPTIONS, END_ACTION_OPTIONS, prefs, resetPrefs,
+  type PlaybackRate, type EndAction,
+} from '@/lib/prefs'
+import type { PublicConfig, WatchSummary } from '@/api/types'
 import { playerReturnPath } from '@/lib/session'
+import { getMyWatchSummary } from '@/api/watch'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -24,6 +28,8 @@ const logCount = ref(0)
 const favoriteCacheCount = ref(0)
 const config = ref<PublicConfig | null>(null)
 const hint = ref('')
+/** 当前用户观看统计（需求 5）。 */
+const watchSummary = ref<WatchSummary | null>(null)
 
 
 const categories = [
@@ -72,9 +78,15 @@ async function loadMeta() {
   try {
     favoriteCacheCount.value = await countAll('favorites')
     config.value = await fetchPublicConfig()
-
   } catch {
     /* 忽略 */
+  }
+  if (auth.isLoggedIn) {
+    try {
+      watchSummary.value = (await getMyWatchSummary()).data
+    } catch {
+      watchSummary.value = null
+    }
   }
 }
 
@@ -117,6 +129,10 @@ async function clearCache() {
 
 function setRate(value: PlaybackRate) {
   prefs.defaultRate = value
+}
+
+function setEndAction(value: EndAction) {
+  prefs.endAction = value
 }
 
 function resetPreferences() {
@@ -274,7 +290,74 @@ onMounted(async () => {
               ></span>
             </button>
           </div>
+
+          <!-- 需求 3：播放结束行为 -->
+          <div>
+            <p class="mb-2">播放结束后</p>
+            <div class="grid grid-cols-3 gap-1.5">
+              <button
+                v-for="opt in END_ACTION_OPTIONS"
+                :key="opt.value"
+                class="rounded-lg border px-2 py-2 text-center text-xs transition"
+                :class="
+                  prefs.endAction === opt.value
+                    ? 'border-white bg-white text-black'
+                    : 'border-white/15 text-white/70 hover:bg-white/10'
+                "
+                :title="opt.desc"
+                @click="setEndAction(opt.value)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+            <p class="mt-1.5 text-[11px] text-white/35">
+              {{ END_ACTION_OPTIONS.find((o) => o.value === prefs.endAction)?.desc }}
+            </p>
+          </div>
+
+          <!-- 需求 2：随机刷到看过视频的策略 -->
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p>随机刷到看过的视频从头播放</p>
+              <p class="text-xs text-white/40">关闭则从上次进度继续；从收藏/历史打开始终续播并提示「从头开始」</p>
+            </div>
+            <button
+              class="relative h-6 w-11 shrink-0 rounded-full transition"
+              :class="prefs.randomRestartWatched ? 'bg-white' : 'bg-white/15'"
+              @click="prefs.randomRestartWatched = !prefs.randomRestartWatched"
+            >
+              <span
+                class="absolute top-0.5 h-5 w-5 rounded-full bg-black transition"
+                :class="prefs.randomRestartWatched ? 'left-[1.375rem]' : 'left-0.5 bg-white/70'"
+              ></span>
+            </button>
+          </div>
         </div>
+      </section>
+
+      <!-- 观看统计（需求 5） -->
+      <section v-if="auth.isLoggedIn" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="text-sm font-medium text-white/80">我的观看统计</h2>
+          <button class="text-[11px] text-white/40 hover:text-white/70" @click="loadMeta">刷新</button>
+        </div>
+        <div class="grid grid-cols-3 gap-2 text-center">
+          <div class="rounded-xl border border-white/10 bg-black/25 px-2 py-3">
+            <p class="text-xl font-semibold text-white">{{ watchSummary?.watched_videos ?? '—' }}</p>
+            <p class="mt-1 text-[11px] text-white/45">观看视频</p>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-black/25 px-2 py-3">
+            <p class="text-xl font-semibold text-emerald-300">{{ watchSummary?.completed_videos ?? '—' }}</p>
+            <p class="mt-1 text-[11px] text-white/45">完整播完</p>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-black/25 px-2 py-3">
+            <p class="text-xl font-semibold text-sky-300">
+              {{ watchSummary ? formatDuration(watchSummary.total_watch_time) : '—' }}
+            </p>
+            <p class="mt-1 text-[11px] text-white/45">观看时长</p>
+          </div>
+        </div>
+        <p class="mt-2 text-[11px] text-white/30">观看时长按实际看过的部分累计；看完的定义为播放至 95% 以上</p>
       </section>
 
       <!-- 观看历史入口 -->
@@ -282,7 +365,7 @@ onMounted(async () => {
         <div class="flex items-center justify-between gap-3">
           <div>
             <h2 class="text-sm font-medium text-white/80">观看历史</h2>
-            <p class="mt-0.5 text-[11px] text-white/35">本机最近观看记录，与收藏夹分开管理</p>
+            <p class="mt-0.5 text-[11px] text-white/35">按账号独立保存，可随时续播，与收藏夹分开管理</p>
           </div>
           <router-link to="/history" class="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10">
             查看历史
@@ -414,10 +497,10 @@ onMounted(async () => {
           单二进制部署，浏览器直接访问，不做转码、不占资源。
         </p>
         <ul class="mt-3 space-y-1 text-[11px] text-white/40">
-          <li>· 全屏竖滑播放，视频自动播放、图片定时切换</li>
-          <li>· 收藏跨设备同步，收藏夹以缩略图网格浏览</li>
-          <li>· 游客可直接浏览，管理员按游客/普通用户分别设置可见范围</li>
-          <li>· 服务端缩略图、文件监听、登录限流、分类日志</li>
+          <li>· 全屏竖滑播放，进度按账号云端同步，可随时续播</li>
+          <li>· 收藏跨设备同步，收藏夹/历史以悬停抽帧网格浏览</li>
+          <li>· 游客可直接浏览，管理员按游客/普通用户分别设置可见范围与播放时段</li>
+          <li>· 观看统计与热度分析、文件监听、登录限流、分类日志</li>
         </ul>
         <div class="mt-3 flex flex-wrap items-center gap-3 text-[11px]">
           <span class="text-white/35">版本 v{{ config?.version ?? '—' }}</span>

@@ -49,13 +49,6 @@ type MediaConfig struct {
 	// IgnoredDirs 不参与扫描的目录名（任意层级命中即跳过）。
 	IgnoredDirs []string `yaml:"ignored_dirs"`
 
-	// 缩略图（B-01）：图片用标准库缩放，视频依赖 ffmpeg。
-	ThumbnailEnabled     bool    `yaml:"thumbnail_enabled"`
-	ThumbnailWidth       int     `yaml:"thumbnail_width"`
-	ThumbnailSeekSeconds float64 `yaml:"thumbnail_seek_seconds"`
-	// FFmpegPath 显式指定 ffmpeg；空则依次查找 PATH 与程序目录。
-	FFmpegPath string `yaml:"ffmpeg_path"`
-
 	// 文件系统监听（B-04）：监听变化后去抖触发扫描；定时扫描仍作为兜底。
 	WatchEnabled         bool `yaml:"watch_enabled"`
 	WatchDebounceSeconds int  `yaml:"watch_debounce_seconds"`
@@ -130,9 +123,6 @@ func Default() *Config {
 			ScanIntervalSeconds:  60,
 			ImageDisplaySeconds:  5,
 			IgnoredDirs:          []string{".git", "node_modules", "@eaDir", "#recycle", ".DS_Store"},
-			ThumbnailEnabled:     true,
-			ThumbnailWidth:       480,
-			ThumbnailSeekSeconds: 1,
 			WatchEnabled:         true,
 			WatchDebounceSeconds: 2,
 			WatchMaxDirs:         4096,
@@ -221,14 +211,8 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("LANREEL_MEDIA_ROOT"); v != "" {
 		cfg.Media.Roots = []string{v}
 	}
-	if v := os.Getenv("LANREEL_FFMPEG_PATH"); v != "" {
-		cfg.Media.FFmpegPath = v
-	}
 	if v := os.Getenv("LANREEL_WATCH_ENABLED"); v != "" {
 		cfg.Media.WatchEnabled = truthy(v)
-	}
-	if v := os.Getenv("LANREEL_THUMBNAILS_ENABLED"); v != "" {
-		cfg.Media.ThumbnailEnabled = truthy(v)
 	}
 	if v := os.Getenv("LANREEL_DATA_DIR"); v != "" {
 		cfg.App.DataDir = v
@@ -317,12 +301,6 @@ func (c *Config) normalize() error {
 	}
 	if c.Media.ImageDisplaySeconds <= 0 {
 		c.Media.ImageDisplaySeconds = 5
-	}
-	if c.Media.ThumbnailWidth <= 0 {
-		c.Media.ThumbnailWidth = 480
-	}
-	if c.Media.ThumbnailSeekSeconds <= 0 {
-		c.Media.ThumbnailSeekSeconds = 1
 	}
 	if c.Media.WatchDebounceSeconds <= 0 {
 		c.Media.WatchDebounceSeconds = 2

@@ -2,11 +2,12 @@
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import MediaGrid from '@/components/media/MediaGrid.vue'
-import { listFavorites } from '@/api/favorites'
+import { batchRemoveFavorites, cleanMissingFavorites, listFavorites, removeFavorite } from '@/api/favorites'
 import { useAuthStore } from '@/stores/auth'
 import { reasonText } from '@/lib/format'
 import { logger } from '@/lib/logger'
 import { rememberPlayerRoute } from '@/lib/session'
+import { getSnapshot, loadProgressMap } from '@/lib/progress'
 import type { MediaItem } from '@/api/types'
 
 const router = useRouter()
@@ -19,13 +20,21 @@ const error = ref('')
 const SCROLL_KEY = 'lanreel.favorites.scroll'
 
 const playableCount = computed(() => items.value.filter((i) => i.playable).length)
+/** 文件已丢失（不是管理员屏蔽）：只对这些条目提供一键清理。 */
+const missingItems = computed(() => items.value.filter((i) => i.reason === 'file_missing'))
+const selectMode = ref(false)
+const selectedKeys = ref<string[]>([])
+const actionItem = ref<MediaItem | null>(null)
+const busy = ref(false)
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await listFavorites()
-    items.value = res.data
+    const [res] = await Promise.all([listFavorites(), loadProgressMap()])
+    const snap = getSnapshot()
+    // 需求 2：收藏夹网格显示观看进度条。
+    items.value = res.data.map((i) => ({ ...i, watchProgress: snap[i.key]?.progress ?? 0 }))
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载收藏失败'
     logger.warn('app', 'favorites', '加载收藏列表失败', { error: error.value })
@@ -44,6 +53,72 @@ function open(item: MediaItem) {
   sessionStorage.setItem(SCROLL_KEY, String(el.scrollTop))
   rememberPlayerRoute('/favorites/play')
   router.push({ path: '/favorites/play', query: { key: item.key } })
+}
+
+function toggleSelect(item: MediaItem) {
+  const i = selectedKeys.value.indexOf(item.key)
+  if (i >= 0) selectedKeys.value.splice(i, 1)
+  else selectedKeys.value.push(item.key)
+}
+
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value
+  if (!selectMode.value) selectedKeys.value = []
+}
+
+function selectAll() {
+  selectedKeys.value = selectMode.value && selectedKeys.value.length === items.value.length
+    ? []
+    : items.value.map((i) => i.key)
+}
+
+function showError(err: unknown, fallback: string) {
+  error.value = err instanceof Error ? err.message : fallback
+  window.setTimeout(() => (error.value = ''), 2600)
+}
+
+/** 取消单条收藏，可作用于被管理员屏蔽或文件丢失的条目。 */
+async function removeOne(item: MediaItem | null) {
+  if (!item) return
+  actionItem.value = null
+  await removeKeys([item.key], '已取消收藏')
+}
+
+async function removeKeys(keys: string[], successText: string) {
+  if (!keys.length || busy.value) return
+  busy.value = true
+  try {
+    const res = keys.length === 1
+      ? await removeFavorite(keys[0]).then(() => ({ data: { removed: 1 } }))
+      : await batchRemoveFavorites(keys)
+    selectedKeys.value = selectedKeys.value.filter((k) => !keys.includes(k))
+    await load()
+    error.value = successText + `（${res.data.removed} 条）`
+    window.setTimeout(() => (error.value = ''), 2200)
+  } catch (err) {
+    showError(err, '取消收藏失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function removeSelected() {
+  await removeKeys([...selectedKeys.value], '已批量取消收藏')
+}
+
+async function removeMissing() {
+  if (!missingItems.value.length || busy.value) return
+  busy.value = true
+  try {
+    const res = await cleanMissingFavorites()
+    await load()
+    error.value = res.data.removed ? `已清理 ${res.data.removed} 条丢失文件` : '没有需要清理的丢失文件'
+    window.setTimeout(() => (error.value = ''), 2200)
+  } catch (err) {
+    showError(err, '清理丢失文件失败')
+  } finally {
+    busy.value = false
+  }
 }
 
 function restoreScroll() {
@@ -74,7 +149,7 @@ onActivated(() => {
 <template>
   <div class="min-h-[100dvh] bg-[#08080a] pb-10 text-white">
     <header
-      class="sticky top-0 z-20 border-b border-white/10 bg-[#08080a]/95 px-3 pb-2 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur"
+      class="sticky top-0 z-40 border-b border-white/10 bg-[#08080a]/95 px-3 pb-2 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur"
     >
       <div class="flex items-center justify-between gap-2">
         <div class="flex min-w-0 items-center gap-2">
@@ -93,12 +168,29 @@ onActivated(() => {
             <p class="text-[11px] text-white/45">{{ items.length }} 条 · 可播放 {{ playableCount }} 条</p>
           </div>
         </div>
-        <button
-          class="h-10 shrink-0 rounded-full border border-white/15 px-3 text-xs text-white/75 transition hover:bg-white/10"
-          @click="load"
-        >
-          刷新
-        </button>
+        <div class="flex shrink-0 items-center gap-1.5">
+          <button
+            class="h-10 rounded-full border border-white/15 px-3 text-xs text-white/75 transition hover:bg-white/10"
+            @click="load"
+          >
+            刷新
+          </button>
+          <button
+            class="h-10 rounded-full border px-3 text-xs transition"
+            :class="selectMode ? 'border-reel-accent bg-reel-accent/20 text-reel-accent' : 'border-white/15 text-white/75 hover:bg-white/10'"
+            @click="toggleSelectMode"
+          >
+            {{ selectMode ? '退出选择' : '批量管理' }}
+          </button>
+          <button
+            v-if="missingItems.length"
+            class="h-10 rounded-full border border-amber-400/40 bg-amber-500/10 px-3 text-xs text-amber-200 transition hover:bg-amber-500/20"
+            :disabled="busy"
+            @click="removeMissing"
+          >
+            清理丢失 {{ missingItems.length }}
+          </button>
+        </div>
       </div>
       <!-- 收藏 / 历史互切 -->
       <nav class="mt-2 grid grid-cols-2 gap-1 rounded-xl bg-white/[0.05] p-1" aria-label="列表切换">
@@ -115,6 +207,27 @@ onActivated(() => {
           观看历史
         </router-link>
       </nav>
+      <div v-if="selectMode" class="mt-2 flex flex-wrap items-center gap-2 rounded-xl bg-white/[0.06] px-3 py-2 text-xs">
+        <span class="mr-auto text-white/70">已选 {{ selectedKeys.length }} / {{ items.length }}</span>
+        <button class="rounded-lg px-2 py-1 text-white/75 hover:bg-white/10" @click="selectAll">
+          {{ selectedKeys.length === items.length ? '取消全选' : '全选' }}
+        </button>
+        <!-- 批量管理内直接提供一键清理入口，避免窄屏顶部按钮被挤出可视区 -->
+        <button
+          class="rounded-lg border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-40"
+          :disabled="!missingItems.length || busy"
+          @click="removeMissing"
+        >
+          一键清除失效视频{{ missingItems.length ? `（${missingItems.length}）` : '' }}
+        </button>
+        <button
+          class="rounded-lg bg-red-500/85 px-3 py-1 font-medium text-white disabled:opacity-40"
+          :disabled="!selectedKeys.length || busy"
+          @click="removeSelected"
+        >
+          取消所选收藏
+        </button>
+      </div>
     </header>
 
     <p v-if="error" class="mx-4 mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -141,6 +254,54 @@ onActivated(() => {
       </button>
     </div>
 
-    <MediaGrid v-else :items="items" @open="open" />
+    <MediaGrid
+      v-else
+      :items="items"
+      :selectable="selectMode"
+      :selected-keys="selectedKeys"
+      @open="open"
+      @longpress="actionItem = $event"
+      @toggle-select="toggleSelect"
+    />
+
+    <!-- 长按收藏条目的操作面板：被管理员屏蔽的条目也能从这里取消收藏 -->
+    <transition name="fade">
+      <div
+        v-if="actionItem"
+        class="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+        @click.self="actionItem = null"
+      >
+        <div class="w-full max-w-md rounded-t-2xl border-t border-white/10 bg-[#16161a] p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <p class="mb-3 truncate text-sm text-white/85">{{ actionItem.rel_path }}</p>
+          <p class="mb-4 text-[11px] text-white/45">
+            {{ actionItem.playable ? '可正常播放' : '当前不可播放，但仍可取消收藏' }}
+          </p>
+          <button
+            class="mb-2 w-full rounded-xl bg-red-500/90 py-3 text-sm font-medium text-white disabled:opacity-40"
+            :disabled="busy"
+            @click="removeOne(actionItem)"
+          >
+            取消收藏
+          </button>
+          <button
+            class="w-full rounded-xl border border-white/15 py-3 text-sm text-white/75"
+            @click="actionItem = null"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
+
+<style scoped>
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+</style>

@@ -59,6 +59,7 @@ type Favorite struct {
 }
 
 // FolderPolicy 文件夹策略（按根索引隔离，B-07）。
+// v0.3.0：普通用户与游客各自拥有独立的播放时段（GuestSchedule*）。
 type FolderPolicy struct {
 	ID           int64     `json:"id"`
 	RootIndex    int       `json:"root_index"`
@@ -68,10 +69,14 @@ type FolderPolicy struct {
 	ScheduleType string    `json:"schedule_type"`
 	TimeStart    string    `json:"time_start"`
 	TimeEnd      string    `json:"time_end"`
+	GuestScheduleType string `json:"guest_schedule_type"`
+	GuestTimeStart    string `json:"guest_time_start"`
+	GuestTimeEnd      string `json:"guest_time_end"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // FileOverride 文件级覆盖。
+// v0.3.0：普通用户与游客各自拥有独立的播放时段（GuestSchedule*）。
 type FileOverride struct {
 	ID           int64     `json:"id"`
 	VideoKey     string    `json:"video_key"`
@@ -80,8 +85,52 @@ type FileOverride struct {
 	ScheduleType string    `json:"schedule_type"`
 	TimeStart    string    `json:"time_start"`
 	TimeEnd      string    `json:"time_end"`
+	GuestScheduleType string `json:"guest_schedule_type"`
+	GuestTimeStart    string `json:"guest_time_start"`
+	GuestTimeEnd      string `json:"guest_time_end"`
 	Note         string    `json:"note"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// WatchHistory 观看历史（服务端存储，按用户隔离，v0.3.0）。
+type WatchHistory struct {
+	ID             int64     `json:"id"`
+	UserID         int64     `json:"user_id"`
+	VideoKey       string    `json:"video_key"`
+	RelPath        string    `json:"rel_path"`
+	MediaType      string    `json:"media_type"`
+	RootIndex      int       `json:"root_index"`
+	FolderPath     string    `json:"folder_path"`
+	Duration       float64   `json:"duration"`
+	Position       float64   `json:"position"`
+	WatchedSeconds float64   `json:"watched_seconds"`
+	PlayCount      int       `json:"play_count"`
+	Completed      bool      `json:"completed"`
+	LastPlayedAt   time.Time `json:"last_played_at"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// MediaStats 单个媒体的聚合统计（热度/播放/收藏，v0.3.0）。
+type MediaStats struct {
+	VideoKey       string    `json:"video_key"`
+	PlayCount      int       `json:"play_count"`
+	CompletedCount int       `json:"completed_count"`
+	WatchedSeconds float64   `json:"watched_seconds"`
+	FavoriteCount  int       `json:"favorite_count"`
+	LastPlayedAt   time.Time `json:"last_played_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// FolderStats 文件夹聚合统计（v0.3.0）。
+type FolderStats struct {
+	RootIndex      int       `json:"root_index"`
+	FolderPath     string    `json:"folder_path"`
+	PlayCount      int       `json:"play_count"`
+	CompletedCount int       `json:"completed_count"`
+	WatchedSeconds float64   `json:"watched_seconds"`
+	FavoriteCount  int       `json:"favorite_count"`
+	MediaCount     int       `json:"media_count"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // MediaMeta 扫描缓存。
