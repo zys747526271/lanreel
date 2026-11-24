@@ -55,8 +55,15 @@ export ADMIN_INIT_PASSWORD='ChangeMe@2026'
 ./dist/lanreel --config config.yaml
 ```
 
-打开 `http://<本机或局域网IP>:8080`，用 `admin` + 上面设置的密码登录。
-普通用户从登录页的「注册」入口自助注册（管理员可在后台关闭该入口）。
+打开 `http://<本机或局域网IP>:8080`：
+
+- **管理员**：用户名 `admin`（可用 `auth.username` 改），密码即上面的 `ADMIN_INIT_PASSWORD`。
+  登录后浏览页右上角出现「后台」，或从设置页「管理后台」进入 `/admin`。
+- **普通用户**：从登录页「注册」自助注册（管理员可在后台关闭该入口），只能浏览与收藏；
+  访问 `/admin` 会进入权限说明页，提示当前账号与切换账号入口。
+
+忘记管理员密码：设好 `ADMIN_INIT_PASSWORD` 后加 `--reset-admin-password` 重启一次即可重置
+（不带该参数不会改动已有密码）。
 
 > 只想先看看效果？准备一个文件夹放几段 MP4 和几张图片，`media.roots` 指过去即可；
 > 也支持 `LANREEL_MEDIA_ROOT=/path/to/media` 环境变量。
@@ -152,17 +159,48 @@ cd web && npx vue-tsc --noEmit
 
 ## API 一览（`/api/v1`）
 
+### 普通接口
+
 | 分组 | 接口 |
 |------|------|
 | 公开 | `GET /health`、`GET /config/public`、`POST /auth/register`、`POST /auth/login` |
 | 认证 | `POST /auth/refresh`、`POST /auth/logout`、`GET /auth/me` |
 | 媒体 | `GET /media/random?limit=&exclude=&mode=`、`GET /media/:key/stream`、`GET /media/:key/thumb` |
 | 收藏 | `GET /favorites`、`POST /favorites`、`DELETE /favorites/:key` |
-| 日志 | `POST /logs/client`（前端上报，默认关闭） |
-| 管理 | `GET /admin/stats`、`POST /admin/scan`、`GET|PUT|DELETE /admin/folders`、`GET|PUT|DELETE /admin/files/:key`、`GET /admin/users`、`PUT|DELETE /admin/users/:id`、`GET /admin/users/:id/favorites`、`POST /admin/users/:id/favorites/clean`、`GET /admin/audit-logs`、`GET /admin/logs`、`GET /admin/logs/:id`、`POST /admin/logs/purge`、`GET|PUT /admin/settings/logging`、`PUT /admin/settings/registration` |
+| 日志 | `POST /logs/client`（前端日志上报，默认关闭） |
+
+### 管理接口（需 `role=admin`，共 22 个）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/stats` | 概览统计（媒体、用户、收藏、策略、扫描、日志分布） |
+| POST | `/admin/scan` | 立即触发媒体重扫 |
+| GET | `/admin/folders` | 文件夹列表（含策略生效状态与继承来源） |
+| PUT | `/admin/folders` | 设置文件夹策略 |
+| DELETE | `/admin/folders?folder_path=` | 删除文件夹策略（回落默认） |
+| GET | `/admin/files` | 文件列表（分页、关键字、文件夹过滤） |
+| GET | `/admin/files/:key` | 单文件策略与可见性 |
+| PUT | `/admin/files/:key` | 设置文件级覆盖 |
+| DELETE | `/admin/files/:key` | 清除文件级覆盖 |
+| GET | `/admin/users` | 用户列表 |
+| PUT | `/admin/users/:id` | 启用/禁用、改角色、重置密码 |
+| DELETE | `/admin/users/:id` | 删除用户（级联收藏） |
+| GET | `/admin/users/:id/favorites` | 只读查看某用户收藏 |
+| POST | `/admin/users/:id/favorites/clean` | 清理该用户的失效收藏 |
+| DELETE | `/admin/favorites/:id` | 按 ID 删除收藏条目 |
+| GET | `/admin/audit-logs` | 审计日志（对象类型、关键字、时间范围） |
+| GET | `/admin/logs` | 运行日志（分类、级别、关键字、请求 ID、时间、分页） |
+| GET | `/admin/logs/:id` | 单条日志详情（含脱敏上下文） |
+| POST | `/admin/logs/purge` | 按保留策略清理运行日志 |
+| GET | `/admin/settings/logging` | 读取日志配置 |
+| PUT | `/admin/settings/logging` | 更新保留天数、最大条数、级别、上报开关 |
+| PUT | `/admin/settings/registration` | 开关普通用户注册 |
 
 约定：成功 `{"data": ...}`，分页附 `meta`，失败 `{"error":{"code","message"}}`。
-媒体流因 `<video>` 无法带自定义头，支持 `?token=` 传入访问令牌。
+管理接口未带令牌返回 `401`，普通用户调用返回 `403`；媒体流因 `<video>` 无法带自定义头，支持 `?token=` 传入访问令牌。
+
+> 管理接口在前端对应 `/admin` 路由组（概览 / 文件夹策略 / 文件策略 / 用户管理 / 运行日志 / 审计日志 / 系统设置）。
+> 入口：用管理员账号登录后，浏览页右上角「后台」或设置页「管理后台」。普通账号访问会进入 `/forbidden` 说明页。
 
 ## 日志设计
 
