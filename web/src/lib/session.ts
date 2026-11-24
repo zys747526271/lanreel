@@ -2,9 +2,11 @@
  * 浏览会话状态（仅存 sessionStorage，关闭标签页即失效）。
  *
  * 用途：
- *  1. 从设置/后台返回时回到进入前的视频与播放进度；
- *  2. 记住最近一次播放器路由，让设置页/后台的「返回」按钮直达播放器，
- *     而不是永远回到随机流第一屏。
+ *  1. SPA 内从设置/收藏/历史/后台返回时，回到进入前的视频与播放进度；
+ *  2. 记住最近一次播放器路由，让设置页/后台的「返回」按钮直达播放器。
+ *
+ * 重要：整页刷新（F5 / 地址栏回车）不算「返回」，必须重新随机播放。
+ * 因此会话只在 SPA 路由离开时保存，pagehide / beforeunload 时统一清除。
  */
 import type { MediaItem } from '@/api/types'
 
@@ -76,6 +78,25 @@ export function savePlaySession(session: Omit<PlaySession, 'savedAt'>) {
 export function loadPlaySession(src: 'favorites' | 'history'): PlaySession | null {
   const saved = read<PlaySession>(PLAY_KEY)
   return saved?.src === src && Array.isArray(saved.items) && saved.items.length ? saved : null
+}
+
+export function clearPlaySession() {
+  try {
+    sessionStorage.removeItem(PLAY_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 整页刷新/关闭时调用：清除全部播放器会话，下次进入重新随机。 */
+export function clearAllPlayerSessions() {
+  clearFeedSession()
+  clearPlaySession()
+  try {
+    sessionStorage.removeItem(ROUTE_KEY)
+  } catch {
+    /* ignore */
+  }
 }
 
 /** 播放器路由白名单：只记住这三个页面，避免把登录页等记住导致循环跳转。 */

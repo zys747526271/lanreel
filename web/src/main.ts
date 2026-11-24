@@ -4,9 +4,14 @@ import App from './App.vue'
 import router from './router'
 import { installGlobalErrorHooks, logger } from './lib/logger'
 import { fetchPublicConfig } from './api/client'
+import { clearAllPlayerSessions } from './lib/session'
 import './styles/main.css'
 
 installGlobalErrorHooks()
+
+// 整页刷新（F5）不是「从设置返回」：清掉会话，下次进入重新随机播放。
+window.addEventListener('pagehide', clearAllPlayerSessions)
+window.addEventListener('beforeunload', clearAllPlayerSessions)
 
 // 读取服务端配置：决定是否允许前端日志上报（F-41，默认关闭）
 void fetchPublicConfig()

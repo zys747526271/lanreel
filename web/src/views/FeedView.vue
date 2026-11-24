@@ -10,6 +10,7 @@ import { reasonText } from '@/lib/format'
 import { prefs } from '@/lib/prefs'
 import { recordHistory } from '@/lib/history'
 import { loadFeedSession, rememberPlayerRoute, saveFeedSession } from '@/lib/session'
+import { pauseAllVideos } from '@/lib/playerRegistry'
 
 const route = useRoute()
 const router = useRouter()
@@ -226,8 +227,10 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('keyup', onKeyup)
   window.addEventListener('blur', stopSeek)
-  window.addEventListener('pagehide', saveSession)
+  // 注意：刷新由 main.ts 的全局 pagehide → clearAllPlayerSessions 处理；
+  // 这里只负责 SPA 内路由离开时的保存（onBeforeUnmount）。
   rememberPlayerRoute(route.fullPath)
+  pauseAllVideos()
 
   const sessionKey = auth.user ? `u${auth.user.id}` : 'guest'
   const saved = loadFeedSession(sessionKey)
@@ -236,7 +239,8 @@ onMounted(async () => {
     activeIndex.value = Math.min(saved.activeIndex, saved.items.length - 1)
     positions.value = { ...saved.positions }
     pendingResumeTime.value = saved.positions[saved.items[activeIndex.value]?.key ?? ''] ?? null
-  } else if (sessionStorage.getItem('lanreel.feed.session') !== sessionKey) {
+  } else {
+    // 刷新 / 首次进入：始终重新随机，不沿用旧列表。
     feed.reset()
     sessionStorage.setItem('lanreel.feed.session', sessionKey)
   }
@@ -261,9 +265,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('keyup', onKeyup)
   window.removeEventListener('blur', stopSeek)
-  window.removeEventListener('pagehide', saveSession)
   stopSeek()
   saveSession()
+  pauseAllVideos()
   if (toastTimer) window.clearTimeout(toastTimer)
   if (historyTimer) window.clearTimeout(historyTimer)
 })

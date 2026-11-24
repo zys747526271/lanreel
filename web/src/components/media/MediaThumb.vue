@@ -1,10 +1,12 @@
 <script setup lang="ts">
 /**
- * 收藏夹 / 观看历史的封面图。
+ * 收藏夹 / 观看历史的封面图（参考 YouTube hover preview / peekbar 的做法）：
  *
- * 服务端缩略图优先；没有服务端缩略图时，鼠标悬停会在约 10 秒内快速跳播采样
- * 5 个位置并抽帧（类似流媒体的 hover 预览），抽到的帧缓存到 IndexedDB，
- * 下次打开网格直接作为封面显示，无需再次下载视频。
+ *  - 服务端缩略图优先；HEAD 探测失败时自动懒抽首帧并缓存到 IndexedDB，
+ *    卡片进入视口即生成，不需要用户触碰；
+ *  - 悬停时用隐藏的 <video> 静音连续播放（不碰主播放器），canvas 每 ~120ms
+ *    抽一帧显示在卡片上，进度条平滑推进，约 10s  preview 完一段片段；
+ *  - 抽到的帧作为封面回退缓存，下次打开网格直接显示。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { withToken } from '@/api/client'
@@ -13,156 +15,339 @@ import type { MediaItem } from '@/api/types'
 
 const props = defineProps<{ item: MediaItem }>()
 
+const rootEl = ref<HTMLElement | null>(null)
+/** 自动抽取 / 缓存的封面 */
 const frame = ref('')
+/** 悬停预览期间临时显示的帧（离开后清除，回落到 frame / serverThumb） */
+const previewFrame = ref('')
 const previewing = ref(false)
 const progress = ref(0)
-/** 服务端 thumb_url 始终是接口地址，需按图片实际加载结果判断缩略图是否可用。 */
 const thumbFailed = ref(false)
+
 const serverThumb = computed(() =>
   props.item.thumb_url && !thumbFailed.value ? withToken(props.item.thumb_url) : '',
 )
-const displaySrc = computed(() => frame.value || serverThumb.value)
+const displaySrc = computed(() => previewFrame.value || frame.value || serverThumb.value)
 
-const SAMPLE_RATIOS = [0.08, 0.28, 0.5, 0.72, 0.92]
-const STEP_MS = 2000 // 5 帧 × 2 秒 ≈ 10 秒快速跳播
+/* --------------------------- 自动抽帧队列 --------------------------- */
+/** 限制同时解码的视频数，避免打开收藏夹时一次性拉几十个视频。 */
+const AUTO_LIMIT = 2
+const autoQueue: Array<() => Promise<void>> = []
+let autoRunning = 0
 
-let video: HTMLVideoElement | null = null
+function enqueueAuto(task: () => Promise<void>) {
+  autoQueue.push(task)
+  void drainAuto()
+}
+
+async function drainAuto() {
+  while (autoRunning < AUTO_LIMIT && autoQueue.length) {
+    const task = autoQueue.shift()!
+    autoRunning += 1
+    try {
+      await task()
+    } finally {
+      autoRunning -= 1
+      void drainAuto()
+    }
+  }
+}
+
+/* ------------------------------ 通用工具 ------------------------------ */
+let disposed = false
+let observer: IntersectionObserver | null = null
 let hoverTimer: number | null = null
-let stepTimer: number | null = null
-let cancelled = false
-let saved = false
+let previewVideo: HTMLVideoElement | null = null
+let previewRaf = 0
+let previewTimer: number | null = null
+let previewStopped = false
+let cachedThisHover = false
 
-function cleanupVideo() {
-  if (!video) return
-  const el = video
-  video = null
+/** 仅用于诊断：当前正在悬停预览的组件。 */
+let activePreviewStop: (() => void) | null = null
+
+function createHiddenVideo(): HTMLVideoElement {
+  const el = document.createElement('video')
+  el.style.cssText =
+    'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;'
+  el.setAttribute('aria-hidden', 'true')
+  el.muted = true
+  el.playsInline = true
+  el.preload = 'auto'
+  // detached <video> 在 Chromium 不加载元数据，必须挂到 DOM（不可见）。
+  document.body.appendChild(el)
+  return el
+}
+
+function destroyVideo(el: HTMLVideoElement | null) {
+  if (!el) return
+  el.pause()
   el.removeAttribute('src')
   el.load()
   el.remove()
 }
 
-function stopPreview() {
-  cancelled = true
-  if (hoverTimer !== null) window.clearTimeout(hoverTimer)
-  if (stepTimer !== null) window.clearTimeout(stepTimer)
-  hoverTimer = null
-  stepTimer = null
-  previewing.value = false
-  progress.value = 0
-  cleanupVideo()
-}
-
-function waitForMetadata(el: HTMLVideoElement): Promise<boolean> {
+function waitForMetadata(el: HTMLVideoElement, timeout = 6000): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false
     const finish = (ok: boolean) => {
       if (done) return
       done = true
+      window.clearTimeout(timer)
       resolve(ok)
     }
+    const timer = window.setTimeout(() => finish(el.readyState >= 1), timeout)
     el.addEventListener('loadedmetadata', () => finish(true), { once: true })
     el.addEventListener('error', () => finish(false), { once: true })
-    window.setTimeout(() => finish(el.readyState >= 1), 6000)
   })
 }
 
-async function sampleAt(el: HTMLVideoElement, time: number): Promise<string | null> {
-  if (cancelled) return null
-  await new Promise<void>((resolve) => {
+function waitForSeek(el: HTMLVideoElement, time: number, timeout = 2500): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (Math.abs(el.currentTime - time) < 0.06 && el.readyState >= 2) {
+      resolve(true)
+      return
+    }
     let done = false
-    const finish = () => {
+    const finish = (ok: boolean) => {
       if (done) return
       done = true
-      resolve()
+      window.clearTimeout(timer)
+      el.removeEventListener('seeked', onSeeked)
+      resolve(ok)
     }
-    el.addEventListener('seeked', finish, { once: true })
-    el.addEventListener('error', finish, { once: true })
+    const onSeeked = () => finish(true)
+    const timer = window.setTimeout(() => finish(el.readyState >= 2), timeout)
+    el.addEventListener('seeked', onSeeked)
     try {
       el.currentTime = time
     } catch {
-      finish()
+      finish(false)
     }
-    window.setTimeout(finish, 3000)
   })
-  if (cancelled || el.readyState < 2 || !el.videoWidth) return null
+}
+
+interface GrabbedFrame {
+  data: string
+  /** 平均亮度，用于跳过片头的纯黑帧 */
+  brightness: number
+}
+
+function grabFrame(el: HTMLVideoElement, maxWidth = 320): GrabbedFrame | null {
+  if (disposed || el.readyState < 2 || !el.videoWidth) return null
   try {
     const canvas = document.createElement('canvas')
-    const scale = Math.min(1, 320 / el.videoWidth)
+    const scale = Math.min(1, maxWidth / el.videoWidth)
     canvas.width = Math.max(1, Math.round(el.videoWidth * scale))
     canvas.height = Math.max(1, Math.round(el.videoHeight * scale))
-    canvas.getContext('2d')?.drawImage(el, 0, 0, canvas.width, canvas.height)
-    return canvas.toDataURL('image/jpeg', 0.72)
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return null
+    ctx.drawImage(el, 0, 0, canvas.width, canvas.height)
+    const data = canvas.toDataURL('image/jpeg', 0.72)
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    let sum = 0
+    let count = 0
+    const stride = Math.max(4, Math.floor(pixels.length / 4 / 200) * 4)
+    for (let i = 0; i < pixels.length; i += stride) {
+      sum += (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3
+      count += 1
+    }
+    return { data, brightness: count ? sum / count : 0 }
   } catch {
     return null
   }
 }
 
-async function startPreview() {
+function cacheFrame(data: string) {
+  if (cachedThisHover) return
+  cachedThisHover = true
+  void saveCachedThumb(props.item.key, data)
+}
+
+/* ------------------------- 自动首帧（无需触碰） ------------------------- */
+function queueFirstFrame() {
   if (props.item.media_type !== 'video' || !props.item.playable) return
-  if (displaySrc.value) return // 已有服务端缩略图或抽帧缓存，无需重复下载
-  cancelled = false
+  enqueueAuto(async () => {
+    if (disposed || frame.value || serverThumb.value) return
+    const cached = await getCachedThumb(props.item.key)
+    if (disposed || cached) {
+      if (cached && !disposed) frame.value = cached
+      return
+    }
+    const el = createHiddenVideo()
+    try {
+      el.src = withToken(props.item.stream_url)
+      if (!(await waitForMetadata(el, 5000)) || disposed) return
+      if (!Number.isFinite(el.duration) || el.duration <= 0) return
+      // 片头常为黑帧：依次尝试 0.1s / 0.8s / 2s / 5%，取第一个足够亮的帧。
+      const candidates = [0.1, 0.8, 2, Math.min(5, el.duration * 0.08)]
+      let picked: string | null = null
+      for (const candidate of candidates) {
+        if (disposed) return
+        const time = Math.max(0, Math.min(candidate, el.duration - 0.06))
+        if (!(await waitForSeek(el, time, 2500))) continue
+        const shot = grabFrame(el)
+        if (!shot) continue
+        if (!picked) picked = shot.data
+        if (shot.brightness > 16) {
+          picked = shot.data
+          break
+        }
+      }
+      if (picked && !disposed && !frame.value && !serverThumb.value) {
+        frame.value = picked
+        void saveCachedThumb(props.item.key, picked)
+      }
+    } finally {
+      destroyVideo(el)
+    }
+  })
+}
+
+/* --------------------------- 悬停连续预览 --------------------------- */
+function stopPreview() {
+  if (activePreviewStop === stopPreview) activePreviewStop = null
+  previewStopped = true
+  if (hoverTimer !== null) window.clearTimeout(hoverTimer)
+  if (previewRaf) cancelAnimationFrame(previewRaf)
+  if (previewTimer !== null) window.clearInterval(previewTimer)
+  hoverTimer = null
+  previewRaf = 0
+  previewTimer = null
+  previewing.value = false
+  previewFrame.value = ''
+  progress.value = 0
+  const el = previewVideo
+  previewVideo = null
+  destroyVideo(el)
+}
+
+async function startPreview() {
+  if (disposed || props.item.media_type !== 'video' || !props.item.playable) return
+  if (activePreviewStop) activePreviewStop()
+  previewStopped = false
+  cachedThisHover = false
   previewing.value = true
-  const el = document.createElement('video')
-  video = el
-  //  detached <video> 在 Chromium 中不会加载元数据，需挂到 DOM（不可见）。
-  el.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;'
-  document.body.appendChild(el)
-  el.src = withToken(props.item.stream_url)
-  el.muted = true
-  el.playsInline = true
-  el.preload = 'auto'
-  if (!(await waitForMetadata(el)) || cancelled || !Number.isFinite(el.duration) || el.duration <= 0) {
-    stopPreview()
-    return
-  }
-  const samples = SAMPLE_RATIOS.map((r) => Math.min(el.duration - 0.05, el.duration * r)).filter((t) => t >= 0)
-  let index = 0
-  const run = async () => {
-    if (cancelled || index >= samples.length) {
+  activePreviewStop = stopPreview
+
+  const el = createHiddenVideo()
+  previewVideo = el
+  try {
+    el.src = withToken(props.item.stream_url)
+    if (!(await waitForMetadata(el, 6000)) || previewStopped || disposed) {
       stopPreview()
       return
     }
-    progress.value = (index + 1) / samples.length
-    const data = await sampleAt(el, samples[index])
-    if (data && !frame.value) {
-      frame.value = data
-      if (!saved) {
-        saved = true
-        void saveCachedThumb(props.item.key, data)
-      }
+    const duration = el.duration
+    if (!Number.isFinite(duration) || duration <= 0) {
+      stopPreview()
+      return
     }
-    index += 1
-    stepTimer = window.setTimeout(() => void run(), STEP_MS)
+    // 约 10s 预览一段：长视频取 48s 片段，短视频按 1× 播完，速度不突兀。
+    const span = Math.min(Math.max(6, duration * 0.6), 48)
+    const rate = Math.max(1, Math.min(8, span / 10))
+    const start = Math.min(0.2, duration * 0.02)
+    el.currentTime = start
+    el.playbackRate = rate
+    const startedAt = performance.now()
+    let lastDraw = 0
+
+    const tick = (now: number) => {
+      if (previewStopped || disposed) return
+      if (now - lastDraw >= 120 && el.readyState >= 2 && el.videoWidth) {
+        lastDraw = now
+        const shot = grabFrame(el, 240)
+        if (shot) {
+          previewFrame.value = shot.data
+          if (!frame.value && !serverThumb.value) {
+            frame.value = shot.data
+            cacheFrame(shot.data)
+          }
+        }
+        progress.value = Math.min(1, Math.max(0, (el.currentTime - start) / span))
+      }
+      if (el.currentTime >= start + span || now - startedAt > 12000) {
+        stopPreview()
+        return
+      }
+      previewRaf = requestAnimationFrame(tick)
+    }
+
+    try {
+      await el.play()
+      if (!previewStopped && !disposed) previewRaf = requestAnimationFrame(tick)
+    } catch {
+      // 自动播放失败时退化为细步长 seek 预览（0.9s 一帧，比原来的 2s 更平滑）。
+      let step = 0
+      const total = 9
+      previewTimer = window.setInterval(() => {
+        if (previewStopped || disposed) return
+        const t = Math.min(duration - 0.06, start + (span * (step + 1)) / total)
+        void waitForSeek(el, t, 1200).then((ok) => {
+          if (!ok || previewStopped || disposed) return
+          const shot = grabFrame(el, 240)
+          if (shot) {
+            previewFrame.value = shot.data
+            if (!frame.value && !serverThumb.value) {
+              frame.value = shot.data
+              cacheFrame(shot.data)
+            }
+          }
+          progress.value = (step + 1) / total
+        })
+        step += 1
+        if (step >= total) stopPreview()
+      }, 900)
+    }
+  } catch {
+    stopPreview()
   }
-  void run()
 }
 
 function onEnter(event: PointerEvent) {
-  if (event.pointerType !== 'mouse' || displaySrc.value) return
+  if (event.pointerType !== 'mouse' || disposed) return
+  if (previewing.value) return
   if (hoverTimer !== null) window.clearTimeout(hoverTimer)
   hoverTimer = window.setTimeout(() => void startPreview(), 180)
 }
 
 onMounted(async () => {
   frame.value = (await getCachedThumb(props.item.key)) ?? ''
-  // thumb_url 恒为接口地址；先探测服务端是否真的有缩略图，缺失时启用悬浮抽帧。
+  // thumb_url 恒为接口地址：HEAD 探测实际是否真有缩略图。
   if (props.item.thumb_url) {
     try {
       const res = await fetch(withToken(props.item.thumb_url), { method: 'HEAD' })
-      if (!res.ok) thumbFailed.value = true
+      const type = res.headers.get('content-type') ?? ''
+      if (!res.ok || (type && !type.startsWith('image/'))) thumbFailed.value = true
     } catch {
       thumbFailed.value = true
     }
   } else {
     thumbFailed.value = true
   }
+  if (disposed || displaySrc.value || !rootEl.value) return
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return
+      observer?.disconnect()
+      observer = null
+      queueFirstFrame()
+    },
+    { rootMargin: '200px' },
+  )
+  observer.observe(rootEl.value)
 })
 
-onBeforeUnmount(stopPreview)
+onBeforeUnmount(() => {
+  disposed = true
+  observer?.disconnect()
+  observer = null
+  stopPreview()
+})
 </script>
 
 <template>
-  <div class="absolute inset-0 overflow-hidden" @pointerenter="onEnter" @pointerleave="stopPreview">
+  <div ref="rootEl" class="absolute inset-0 overflow-hidden" @pointerenter="onEnter" @pointerleave="stopPreview">
     <img
       v-if="displaySrc"
       :src="displaySrc"
@@ -171,6 +356,7 @@ onBeforeUnmount(stopPreview)
       loading="lazy"
       alt=""
       @error="
+        previewFrame = '';
         thumbFailed = true;
         ($event.target as HTMLImageElement).style.display = 'none'
       "
@@ -187,7 +373,7 @@ onBeforeUnmount(stopPreview)
     <div
       v-if="previewing"
       class="pointer-events-none absolute inset-x-0 bottom-0 h-1 bg-white/20"
-      title="正在快速跳播并抽取封面"
+      title="正在静音预览并抽取封面"
     >
       <div class="h-full bg-reel-accent transition-all" :style="{ width: `${progress * 100}%` }"></div>
     </div>

@@ -14,6 +14,7 @@ import { withToken } from '@/api/client'
 import { logger } from '@/lib/logger'
 import { reasonText, formatDuration } from '@/lib/format'
 import { RATE_OPTIONS, type PlaybackRate } from '@/lib/prefs'
+import { pauseOtherVideos, registerVideo, unregisterVideo } from '@/lib/playerRegistry'
 import type { MediaItem } from '@/api/types'
 
 const props = defineProps<{
@@ -138,13 +139,28 @@ function startImageTimer() {
 
 async function tryPlay() {
   const el = videoEl.value
-  if (!el) return
+  if (!el || !props.active) return
+  // 会话恢复 / 快速切换时，避免首条与恢复条目同时出声。
+  pauseOtherVideos(el)
   el.muted = props.muted || forcedMute.value
   try {
     await el.play()
+    // play() 是异步的：等待期间可能已经切走，此时必须立刻让位。
+    if (!props.active || userPaused.value) {
+      el.pause()
+      playing.value = false
+      paused.value = true
+      return
+    }
+    pauseOtherVideos(el)
     playing.value = true
     paused.value = false
   } catch {
+    if (!props.active || userPaused.value) {
+      playing.value = false
+      paused.value = true
+      return
+    }
     // 有声自动播放被浏览器拦截：降级为静音重试，并提示用户点击恢复声音。
     if (!el.muted) {
       forcedMute.value = true
@@ -152,6 +168,13 @@ async function tryPlay() {
       emit('autoplay-muted')
       try {
         await el.play()
+        if (!props.active || userPaused.value) {
+          el.pause()
+          playing.value = false
+          paused.value = true
+          return
+        }
+        pauseOtherVideos(el)
         playing.value = true
         paused.value = false
         return
@@ -225,6 +248,7 @@ function isPaused() {
 /** 元数据/首帧就绪后再触发播放，避免加载竞态导致静默失败。 */
 function onCanPlay() {
   if (props.active && !userPaused.value && !mediaError.value) void tryPlay()
+  else if (!props.active && !videoEl.value?.paused) videoEl.value?.pause()
 }
 
 function applyResume() {
@@ -364,12 +388,15 @@ onMounted(() => {
 })
 
 // <video> 元素在 v-if 渲染完成后才可用，元素出现时补一次播放尝试。
-watch(videoEl, (el) => {
+watch(videoEl, (el, oldEl) => {
+  if (oldEl) unregisterVideo(oldEl)
   if (el) {
+    registerVideo(el)
     el.muted = props.muted || forcedMute.value
     el.playbackRate = effectiveRate.value
     applyResume()
     if (props.active) void tryPlay()
+    else if (!el.paused) el.pause()
   }
 })
 
@@ -538,6 +565,7 @@ onBeforeUnmount(() => {
   clearImageTimer()
   emitProgress(true)
   pause()
+  unregisterVideo(videoEl.value)
   clearPressTimer()
   document.removeEventListener('pointerdown', onFirstGesture)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
@@ -655,18 +683,6 @@ defineExpose({ togglePlay, seekBy, getCurrentTime, isPaused, getRate: () => effe
       </div>
     </transition>
 
-    <!-- 倍速模式提示按钮：单击即退出倍速模式并恢复 1× -->
-    <button
-      v-if="active && rateOverride !== null"
-      class="absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/25 bg-black/55 px-5 py-3 text-center text-white shadow-xl backdrop-blur-md transition active:scale-95"
-      :title="`当前 ${rateHint}，单击恢复 1×`"
-      @pointerdown.stop
-      @click.stop="exitRateMode"
-    >
-      <span class="block text-xl font-semibold tracking-wide">{{ rateHint }}</span>
-      <span class="mt-0.5 block text-[10px] text-white/60">上下滑动调速 · 点击恢复 1×</span>
-    </button>
-
     <!-- 底部控制条：进度 / 时间 / 播放 / 静音 / 全屏 -->
     <div
       v-if="active && item.playable"
@@ -728,10 +744,17 @@ defineExpose({ togglePlay, seekBy, getCurrentTime, isPaused, getRate: () => effe
           <span v-else class="tabular-nums">图片 · {{ imageDuration }}s</span>
         </div>
         <div class="flex items-center gap-1.5">
-          <span
+          <!-- 倍速提示放在底部控制条（视频下方），半透明且不遮挡画面；单击即恢复 1× -->
+          <button
             v-if="rateOverride !== null"
-            class="rounded-full border border-white/20 bg-black/45 px-2 py-1 text-[10px] text-white/80 backdrop-blur"
-          >{{ rateHint }}</span>
+            class="flex h-7 items-center gap-1 rounded-full border border-white/25 bg-black/40 px-2.5 text-[11px] text-white/90 backdrop-blur transition hover:bg-black/60 active:scale-95"
+            :title="`当前 ${rateHint}，单击退出倍速模式并恢复 1×`"
+            @pointerdown.stop
+            @click.stop="exitRateMode"
+          >
+            <span class="font-semibold">{{ rateHint }}</span>
+            <span class="hidden text-[10px] text-white/55 sm:inline">点击恢复 1×</span>
+          </button>
           <button
             class="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 backdrop-blur transition hover:bg-black/65 active:scale-90"
             :title="muted ? '开启声音' : '静音'"

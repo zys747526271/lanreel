@@ -8,6 +8,7 @@ import { formatDuration, reasonText } from '@/lib/format'
 import { prefs, exitFullscreen } from '@/lib/prefs'
 import { listHistory, recordHistory, type HistoryEntry } from '@/lib/history'
 import { logger } from '@/lib/logger'
+import { pauseAllVideos } from '@/lib/playerRegistry'
 import {
   loadPlaySession,
   rememberPlayerRoute,
@@ -208,8 +209,9 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('keyup', onKeyup)
   window.addEventListener('blur', stopSeek)
-  window.addEventListener('pagehide', saveSession)
+  // 刷新清会话由 main.ts 全局处理；这里仅在 SPA 路由离开时保存（onBeforeUnmount）。
   rememberPlayerRoute(route.fullPath)
+  pauseAllVideos()
   if (!auth.isLoggedIn) {
     router.replace({ path: '/login', query: { redirect: '/favorites' } })
     return
@@ -249,9 +251,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('keyup', onKeyup)
   window.removeEventListener('blur', stopSeek)
-  window.removeEventListener('pagehide', saveSession)
   stopSeek()
   saveSession()
+  pauseAllVideos()
   void exitFullscreen()
   if (toastTimer) window.clearTimeout(toastTimer)
   if (historyTimer) window.clearTimeout(historyTimer)
