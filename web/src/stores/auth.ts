@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import * as authApi from '@/api/auth'
+import * as setupApi from '@/api/setup'
 import { ApiError, tokenStorage } from '@/api/client'
 import { getItem, putItem, deleteItem } from '@/lib/db'
 import { logger } from '@/lib/logger'
@@ -19,9 +20,45 @@ export const useAuthStore = defineStore('auth', () => {
   const registrationOpen = ref(true)
   const loading = ref(false)
   const initialized = ref(false)
+  /** null 表示尚未查询：首次启动由路由守卫拉取一次，决定是否进入初始化页面 */
+  const setupRequired = ref<boolean | null>(null)
 
   const isLoggedIn = computed(() => !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
+
+  /** 查询（并缓存）首次初始化状态。失败时不阻断页面，按已初始化处理。 */
+  async function loadSetupStatus(force = false): Promise<boolean> {
+    if (!force && setupRequired.value !== null) return setupRequired.value
+    try {
+      const status = await setupApi.fetchSetupStatus()
+      setupRequired.value = status.setup_required
+    } catch {
+      // 后端不可达：不把用户困在初始化页，登录/浏览页会各自给出网络提示
+      setupRequired.value = false
+    }
+    return setupRequired.value
+  }
+
+  /** 完成首次初始化：创建管理员并直接登录。 */
+  async function completeSetup(username: string, password: string) {
+    loading.value = true
+    try {
+      const data = await setupApi.createInitialAdmin(username, password)
+      user.value = data.user
+      tokenStorage.save(data.tokens)
+      setupRequired.value = false
+      initialized.value = true
+      logger.setUser(data.user.id)
+      await cacheUser(data.user)
+      logger.info('auth', 'setup', '首次初始化完成，已创建管理员', {
+        user_id: data.user.id,
+        role: data.user.role,
+      })
+      return data.user
+    } finally {
+      loading.value = false
+    }
+  }
 
   async function restoreCache() {
     try {
@@ -133,8 +170,11 @@ export const useAuthStore = defineStore('auth', () => {
     registrationOpen,
     loading,
     initialized,
+    setupRequired,
     isLoggedIn,
     isAdmin,
+    loadSetupStatus,
+    completeSetup,
     bootstrap,
     login,
     register,

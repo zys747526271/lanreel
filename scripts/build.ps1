@@ -45,4 +45,5 @@ Pop-Location
 $size = [math]::Round((Get-Item "dist/lanreel.exe").Length / 1MB, 1)
 Write-Host ""
 Write-Host "构建完成：dist/lanreel.exe（$size MB，含内嵌前端）" -ForegroundColor Green
-Write-Host "启动：`$env:ADMIN_INIT_PASSWORD='你的密码'; .\dist\lanreel.exe --config config.yaml"
+Write-Host "启动：.\dist\lanreel.exe --config config.yaml"
+Write-Host "首次访问：按网页引导创建管理员（无浏览器环境可设 ADMIN_INIT_PASSWORD 预置）"

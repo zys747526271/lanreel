@@ -12,11 +12,11 @@ make build            # 产出 dist/lanreel（Windows 为 dist/lanreel.exe）
 cp server/configs/config.example.yaml config.yaml
 #    修改 media.roots 指向你的媒体目录
 
-# 3) 准备管理员密码（不要写进配置文件并提交到仓库）
-export ADMIN_INIT_PASSWORD='你的强密码'
-
-# 4) 启动
+# 3) 启动
 ./dist/lanreel --config config.yaml
+
+# 4) 首次访问：页面会进入「创建管理员」，设置用户名与密码后即可使用
+#    该页面只在未初始化时出现，之后启动直接进主页
 
 # 5) 首次登录后建议
 #    - 在「系统设置」确认注册入口是否需要关闭
@@ -24,6 +24,9 @@ export ADMIN_INIT_PASSWORD='你的强密码'
 ```
 
 启动后访问 `http://<局域网IP>:8080`。
+
+> 无浏览器的环境可跳过创建页面：启动时提供 `ADMIN_INIT_PASSWORD`，服务会按
+> `auth.username`（默认 `admin`）直接创建管理员；两者只需选一种。
 
 ## 2. 关键环境变量
 
@@ -34,7 +37,7 @@ export ADMIN_INIT_PASSWORD='你的强密码'
 | `LANREEL_MEDIA_ROOT` | 单个媒体根目录 | `./media` |
 | `LANREEL_MEDIA_ROOTS` | 多个媒体根目录（逗号或分号分隔） | — |
 | `LANREEL_DATA_DIR` | 数据目录（业务库、日志库、密钥） | `./data` |
-| `ADMIN_INIT_PASSWORD` | 管理员初始密码 | 无（必须提供） |
+| `ADMIN_INIT_PASSWORD` | 管理员初始密码（可选；提供则跳过网页初始化，直接用该密码创建 `auth.username`） | 无（默认走网页创建） |
 | `LANREEL_JWT_SECRET` | JWT 密钥，留空自动生成并持久化 | 自动生成 |
 | `LANREEL_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
 | `LANREEL_TLS_ENABLED` | 是否启用 HTTPS | `false` |
@@ -52,6 +55,7 @@ sudo cp server/configs/config.example.yaml /opt/lanreel/config.yaml
 sudo mkdir -p /opt/lanreel/data && sudo chown -R lanreel:lanreel /opt/lanreel
 
 # 管理员密码放环境文件，避免出现在 systemd unit 里
+# 可选：不写则首次访问网页时创建管理员（推荐，避免弱密码留在文件里）
 echo "ADMIN_INIT_PASSWORD=你的强密码" | sudo tee /etc/lanreel/env
 sudo chmod 600 /etc/lanreel/env
 

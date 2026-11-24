@@ -52,6 +52,8 @@ func failService(c *gin.Context, err error) {
 		fail(c, http.StatusForbidden, "registration_closed", err.Error())
 	case errors.Is(err, service.ErrUsernameTaken):
 		fail(c, http.StatusConflict, "username_taken", err.Error())
+	case errors.Is(err, service.ErrSetupCompleted):
+		fail(c, http.StatusConflict, "setup_completed", err.Error())
 	case errors.Is(err, service.ErrValidation):
 		fail(c, http.StatusBadRequest, "validation_failed", err.Error())
 	case errors.Is(err, service.ErrMediaNotFound):

@@ -11,6 +11,12 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '浏览' },
     },
     {
+      path: '/setup',
+      name: 'setup',
+      component: () => import('@/views/SetupView.vue'),
+      meta: { title: '首次部署 · 创建管理员' },
+    },
+    {
       path: '/login',
       name: 'login',
       component: () => import('@/views/LoginView.vue'),
@@ -95,6 +101,16 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
+
+  // 首次部署：未初始化时把任意入口都导向创建管理员页；初始化后 /setup 失效
+  const setupRequired = await auth.loadSetupStatus()
+  if (setupRequired) {
+    return to.path === '/setup' ? true : { path: '/setup' }
+  }
+  if (to.path === '/setup') {
+    return { path: auth.isLoggedIn ? '/' : '/login' }
+  }
+
   if (!auth.initialized) await auth.bootstrap()
 
   if (to.meta.requiresAuth && !auth.isLoggedIn) {

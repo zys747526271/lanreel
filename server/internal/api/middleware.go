@@ -174,14 +174,15 @@ func (h *Handlers) requireAdmin() gin.HandlerFunc {
 func (h *Handlers) publicConfig() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ok(c, gin.H{
-			"app":                    "lanreel",
-			"version":                h.version,
-			"registration_open":      h.auth.RegistrationOpen(c.Request.Context()),
-			"image_display_seconds":  h.cfg.Media.ImageDisplaySeconds,
-			"timezone":               h.cfg.App.Timezone,
-			"max_random_limit":       20,
-			"scan_interval_seconds":  h.cfg.Media.ScanIntervalSeconds,
-			"frontend_log_upload":    h.admin.LoggingSettings(c.Request.Context()).FrontendUpload,
+			"app":                   "lanreel",
+			"version":               h.version,
+			"registration_open":     h.auth.RegistrationOpen(c.Request.Context()),
+			"setup_required":        h.auth.SetupRequired(c.Request.Context()),
+			"image_display_seconds": h.cfg.Media.ImageDisplaySeconds,
+			"timezone":              h.cfg.App.Timezone,
+			"max_random_limit":      20,
+			"scan_interval_seconds": h.cfg.Media.ScanIntervalSeconds,
+			"frontend_log_upload":   h.admin.LoggingSettings(c.Request.Context()).FrontendUpload,
 		})
 	}
 }

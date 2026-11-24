@@ -5,6 +5,7 @@
 **当前版本：v0.1.0（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
 
 <p>
+  <img src="./docs/screenshots/setup-admin.png" width="240" alt="首次部署：创建管理员" />
   <img src="./docs/screenshots/feed-video.png" width="240" alt="浏览页：全屏竖滑 + 视频播放" />
   <img src="./docs/screenshots/feed-favorites.png" width="240" alt="仅看收藏模式" />
   <img src="./docs/screenshots/admin-dashboard.png" width="620" alt="管理后台概览" />
@@ -36,6 +37,7 @@
 
 **部署与资源**
 - 单二进制（26MB，含前端），`CGO_ENABLED=0` 可交叉编译
+- 首次部署在浏览器内创建管理员，之后每次启动直接进主页（无浏览器可用 `ADMIN_INIT_PASSWORD` 预置）
 - 不做服务端转码、不缓存媒体本体；空闲内存实测 ~28MB
 - `GOMEMLIMIT` / `GOMAXPROCS` 通过环境变量注入，便于与前台游戏共存
 
@@ -48,22 +50,25 @@
 # 2) 配置：把 media.roots 指向你的媒体目录
 cp server/configs/config.example.yaml config.yaml
 
-# 3) 设置管理员初始密码（不要提交到仓库）
-export ADMIN_INIT_PASSWORD='ChangeMe@2026'
-
-# 4) 启动（Windows 为 dist\lanreel.exe）
+# 3) 启动（Windows 为 dist\lanreel.exe）
 ./dist/lanreel --config config.yaml
 ```
 
 打开 `http://<本机或局域网IP>:8080`：
 
-- **管理员**：用户名 `admin`（可用 `auth.username` 改），密码即上面的 `ADMIN_INIT_PASSWORD`。
-  登录后浏览页右上角出现「后台」，或从设置页「管理后台」进入 `/admin`。
+- **首次部署**：页面自动进入「创建管理员」，设置用户名与密码后直接进入主页。
+  该页面只在实例尚未初始化时出现，之后的每次启动都直接进主页（未登录则到登录页）；
+  创建成功后接口即失效，不会出现「谁先打开谁当管理员」。
+- **管理员**：用你创建的管理员账号登录，浏览页右上角出现「后台」，或从设置页「管理后台」进入 `/admin`。
 - **普通用户**：从登录页「注册」自助注册（管理员可在后台关闭该入口），只能浏览与收藏；
   访问 `/admin` 会进入权限说明页，提示当前账号与切换账号入口。
 
-忘记管理员密码：设好 `ADMIN_INIT_PASSWORD` 后加 `--reset-admin-password` 重启一次即可重置
-（不带该参数不会改动已有密码）。
+无浏览器的部署（容器 / 自动化）仍可按配置预置管理员：启动时提供 `ADMIN_INIT_PASSWORD`，
+服务会直接创建 `auth.username`（默认 `admin`）并跳过初始化页面。
+两者只需选一种：预置了密码就不会再出现创建页面。
+
+忘记管理员密码：带上 `ADMIN_INIT_PASSWORD` 与 `--reset-admin-password` 重启一次即可重置
+（不带该参数不会改动已有密码）。若管理员用户名与 `auth.username` 不同，会重置最早创建的那个管理员。
 
 > 只想先看看效果？准备一个文件夹放几段 MP4 和几张图片，`media.roots` 指过去即可；
 > 也支持 `LANREEL_MEDIA_ROOT=/path/to/media` 环境变量。
@@ -163,6 +168,7 @@ cd web && npx vue-tsc --noEmit
 
 | 分组 | 接口 |
 |------|------|
+| 初始化 | `GET /setup/status`、`POST /setup/admin`（仅在未初始化时生效，创建第一个管理员） |
 | 公开 | `GET /health`、`GET /config/public`、`POST /auth/register`、`POST /auth/login` |
 | 认证 | `POST /auth/refresh`、`POST /auth/logout`、`GET /auth/me` |
 | 媒体 | `GET /media/random?limit=&exclude=&mode=`、`GET /media/:key/stream`、`GET /media/:key/thumb` |
@@ -198,6 +204,7 @@ cd web && npx vue-tsc --noEmit
 
 约定：成功 `{"data": ...}`，分页附 `meta`，失败 `{"error":{"code","message"}}`。
 管理接口未带令牌返回 `401`，普通用户调用返回 `403`；媒体流因 `<video>` 无法带自定义头，支持 `?token=` 传入访问令牌。
+`POST /setup/admin` 在已初始化后返回 `409 setup_completed`；`GET /config/public` 与 `/setup/status` 都会返回 `setup_required`。
 
 > 管理接口在前端对应 `/admin` 路由组（概览 / 文件夹策略 / 文件策略 / 用户管理 / 运行日志 / 审计日志 / 系统设置）。
 > 入口：用管理员账号登录后，浏览页右上角「后台」或设置页「管理后台」。普通账号访问会进入 `/forbidden` 说明页。

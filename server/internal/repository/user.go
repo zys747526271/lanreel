@@ -160,6 +160,14 @@ func (s *Store) CountAdmins(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// FirstAdmin 返回最早创建的启用管理员。
+// 用于 --reset-admin-password 兜底：网页初始化时管理员用户名可能不同于 auth.username。
+func (s *Store) FirstAdmin(ctx context.Context) (*models.User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE role = ? AND enabled = 1 ORDER BY id ASC LIMIT 1`,
+		models.RoleAdmin))
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

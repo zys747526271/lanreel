@@ -11,8 +11,9 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # 管理员初始密码：请改成自己的强密码，或改用 env_file 注入
-      ADMIN_INIT_PASSWORD: "ChangeMe@2026"
+      # 管理员：默认由首次访问的网页引导创建。
+      # 如需在容器里预置（无浏览器场景），取消注释并改成自己的强密码：
+      # ADMIN_INIT_PASSWORD: "ChangeMe@2026"
       LANREEL_TIMEZONE: "Asia/Shanghai"
       LANREEL_LOG_LEVEL: "info"
       LANREEL_REGISTRATION_OPEN: "true"

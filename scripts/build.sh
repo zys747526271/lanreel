@@ -32,4 +32,5 @@ fi
 SIZE=$(du -h "$BIN" | cut -f1)
 echo ""
 echo "构建完成：$BIN（$SIZE，含内嵌前端）"
-echo "启动：ADMIN_INIT_PASSWORD='你的密码' ./$BIN --config config.yaml"
+echo "启动：./$BIN --config config.yaml"
+echo "首次访问：浏览器打开后按引导创建管理员（无浏览器环境可设 ADMIN_INIT_PASSWORD 预置）"

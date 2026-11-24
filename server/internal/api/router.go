@@ -62,6 +62,10 @@ func (h *Handlers) Engine() *gin.Engine {
 		v1.GET("/health", h.handleHealth)
 		v1.GET("/config/public", h.publicConfig())
 
+		// 首次部署引导：仅在未初始化时可用，创建第一个管理员
+		v1.GET("/setup/status", h.handleSetupStatus)
+		v1.POST("/setup/admin", h.handleSetupAdmin)
+
 		v1.POST("/auth/register", h.handleRegister)
 		v1.POST("/auth/login", h.handleLogin)
 		v1.POST("/auth/refresh", h.handleRefresh)

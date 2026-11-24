@@ -96,6 +96,9 @@ func main() {
 		}
 		log.Fatalf("[lanreel] 管理员初始化失败: %v", err)
 	}
+	if !*scanOnly && authSvc.SetupRequired(context.Background()) {
+		fmt.Printf("尚未创建管理员：请打开 http://<本机或局域网IP>:%d 按页面引导完成初始化\n", cfg.Server.Port)
+	}
 
 	scanner := media.NewScanner(cfg, store, logger)
 	evaluator := policy.NewEvaluator(store, cfg.Location, logger)
@@ -119,18 +122,18 @@ func main() {
 
 	// 启动日志（配置摘要与资源限制参数，10.2）。
 	logger.Info(logging.CatSystem, "app.bootstrap", "LanReel 服务启动", map[string]any{
-		"version":          version,
-		"addr":             cfg.Addr(),
-		"tls":              cfg.Server.TLS.Enabled,
-		"media_roots":      len(cfg.Media.Roots),
-		"scan_interval":    cfg.Media.ScanIntervalSeconds,
-		"timezone":         cfg.App.Timezone,
-		"db":               cfg.Database.Path,
-		"log_db":           cfg.Logging.Path,
-		"log_level":        cfg.LogLevel(),
-		"gomemlimit":       os.Getenv("GOMEMLIMIT"),
-		"gomaxprocs":       os.Getenv("GOMAXPROCS"),
-		"config_file":      cfg.ConfigFile,
+		"version":       version,
+		"addr":          cfg.Addr(),
+		"tls":           cfg.Server.TLS.Enabled,
+		"media_roots":   len(cfg.Media.Roots),
+		"scan_interval": cfg.Media.ScanIntervalSeconds,
+		"timezone":      cfg.App.Timezone,
+		"db":            cfg.Database.Path,
+		"log_db":        cfg.Logging.Path,
+		"log_level":     cfg.LogLevel(),
+		"gomemlimit":    os.Getenv("GOMEMLIMIT"),
+		"gomaxprocs":    os.Getenv("GOMAXPROCS"),
+		"config_file":   cfg.ConfigFile,
 	})
 
 	scanner.Start(ctx)

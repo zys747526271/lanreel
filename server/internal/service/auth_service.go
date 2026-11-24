@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zys747526271/lanreel/server/internal/auth"
@@ -22,10 +24,14 @@ var (
 	ErrRegistrationClosed = errors.New("注册入口已关闭")
 	ErrUsernameTaken      = errors.New("用户名已存在")
 	ErrValidation         = errors.New("参数校验失败")
+	ErrSetupCompleted     = errors.New("实例已完成初始化，无法重复创建初始管理员")
 )
 
 // SettingRegistrationOpen 注册开关设置键。
 const SettingRegistrationOpen = "registration_open"
+
+// SettingSetupCompleted 首次初始化完成标志（管理员已创建）。
+const SettingSetupCompleted = "setup_completed"
 
 // AuthService 认证与账号业务。
 type AuthService struct {
@@ -33,6 +39,8 @@ type AuthService struct {
 	tokens *auth.Manager
 	log    *logging.Logger
 	cfg    *config.Config
+	// setupMu 串行化首次初始化，避免并发请求创建出多个管理员。
+	setupMu sync.Mutex
 }
 
 // NewAuthService 构造认证服务。
@@ -156,50 +164,178 @@ func (s *AuthService) Logout(ctx context.Context, u *models.User) {
 	s.log.Info(logging.CatAuth, "api.auth", "用户登出", withCtx(ctx, map[string]any{"user_id": u.ID, "username": u.Username}))
 }
 
-// InitializeAdmin 按配置初始化/校正管理员账号（F-24 / N-17）。
-// resetPassword=true 时用配置中的初始密码覆盖现有密码。
+// SetupRequired 判断实例是否仍需完成首次初始化（网页引导创建管理员）。
+//
+// 判定以 setup_completed 标志为准，并在缺省时用「是否已有启用的管理员」兜底，
+// 这样从旧版本升级上来的实例不会被要求重新初始化。
+func (s *AuthService) SetupRequired(ctx context.Context) bool {
+	if s.store.GetSetting(ctx, SettingSetupCompleted, "") == "1" {
+		return false
+	}
+	if n, err := s.store.CountAdmins(ctx); err == nil && n > 0 {
+		return false
+	}
+	return true
+}
+
+// markSetupCompleted 写入初始化完成标志（失败只记录，不影响启动）。
+func (s *AuthService) markSetupCompleted(ctx context.Context) {
+	if s.store.GetSetting(ctx, SettingSetupCompleted, "") == "1" {
+		return
+	}
+	if err := s.store.SetSetting(ctx, SettingSetupCompleted, "1"); err != nil {
+		s.log.Warn(logging.CatSystem, "app.bootstrap", "写入初始化标志失败", map[string]any{"error": err})
+	}
+}
+
+// CreateInitialAdmin 首次初始化：创建管理员账号并直接签发令牌（自动登录）。
+//
+// 仅在实例尚未初始化时可用；并发调用由 setupMu 串行化。
+func (s *AuthService) CreateInitialAdmin(ctx context.Context, username, password string) (*models.User, *auth.TokenPair, error) {
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
+	if !s.SetupRequired(ctx) {
+		return nil, nil, ErrSetupCompleted
+	}
+	username = strings.TrimSpace(username)
+	if err := validateCredentials(username, password); err != nil {
+		return nil, nil, err
+	}
+	if _, err := s.store.GetUserByUsername(ctx, username); err == nil {
+		return nil, nil, ErrUsernameTaken
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return nil, nil, err
+	}
+	u, err := s.store.CreateUser(ctx, username, hash, models.RoleAdmin, true)
+	if err != nil {
+		if strings.Contains(err.Error(), "已存在") {
+			return nil, nil, ErrUsernameTaken
+		}
+		return nil, nil, err
+	}
+	// 初始化完成标志先落库，避免并发窗口内被重复初始化。
+	if err := s.store.SetSetting(ctx, SettingSetupCompleted, "1"); err != nil {
+		return nil, nil, err
+	}
+	pair, err := s.tokens.Issue(u)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	after, _ := json.Marshal(map[string]any{"username": u.Username, "role": u.Role})
+	if err := s.store.InsertAudit(ctx, models.AuditLog{
+		AdminUserID: u.ID, TargetType: models.AuditTargetUser, TargetID: fmt.Sprint(u.ID),
+		Action: "首次部署创建管理员", AfterValue: string(after),
+	}); err != nil {
+		s.log.Warn(logging.CatSystem, "app.setup", "写入初始化审计失败", withCtx(ctx, map[string]any{"error": err}))
+	}
+	s.log.Info(logging.CatSystem, "app.setup", "首次初始化完成：已创建管理员", withCtx(ctx, map[string]any{
+		"username": u.Username, "user_id": u.ID,
+	}))
+	return u, pair, nil
+}
+
+// InitializeAdmin 启动时校正管理员账号。
+//
+// 行为约定（与首次部署网页引导配合）：
+//   - 已有管理员：保证角色/状态正确，resetPassword 时用配置密码覆盖，并标记初始化完成；
+//   - 全新实例且显式提供了初始密码（ADMIN_INIT_PASSWORD）：按配置创建，便于无浏览器部署；
+//   - 全新实例且未提供密码：不创建任何账号，留给网页引导创建，避免默认弱口令。
 func (s *AuthService) InitializeAdmin(ctx context.Context, resetPassword bool) error {
 	username := strings.TrimSpace(s.cfg.Auth.Username)
 	if username == "" {
 		username = "admin"
 	}
+	initPassword := strings.TrimSpace(s.cfg.Auth.InitPassword)
+
 	existing, err := s.store.GetUserByUsername(ctx, username)
 	if errors.Is(err, repository.ErrNotFound) {
-		if strings.TrimSpace(s.cfg.Auth.InitPassword) == "" {
-			return errors.New("未提供管理员初始密码（ADMIN_INIT_PASSWORD）")
+		existing = nil
+	} else if err != nil {
+		return err
+	}
+
+	if existing != nil {
+		role := models.RoleAdmin
+		enabled := true
+		if existing.Role != models.RoleAdmin || !existing.Enabled {
+			if err := s.store.UpdateUser(ctx, existing.ID, nil, &role, &enabled); err != nil {
+				return err
+			}
+			s.log.Info(logging.CatSystem, "app.bootstrap", "已校正管理员账号角色/状态", map[string]any{"username": username})
 		}
-		hash, herr := auth.HashPassword(s.cfg.Auth.InitPassword)
-		if herr != nil {
-			return herr
+		if resetPassword {
+			if initPassword == "" {
+				s.log.Warn(logging.CatSystem, "app.bootstrap", "请求重置管理员密码但未提供初始密码", map[string]any{"username": username})
+			} else {
+				hash, herr := auth.HashPassword(initPassword)
+				if herr != nil {
+					return herr
+				}
+				if err := s.store.UpdateUser(ctx, existing.ID, &hash, nil, nil); err != nil {
+					return err
+				}
+				s.log.Info(logging.CatSystem, "app.bootstrap", "已重置管理员密码（来自启动配置）", map[string]any{"username": username})
+			}
 		}
-		u, cerr := s.store.CreateUser(ctx, username, hash, models.RoleAdmin, true)
-		if cerr != nil {
-			return cerr
-		}
-		s.log.Info(logging.CatSystem, "app.bootstrap", "已创建管理员账号", map[string]any{"username": username, "user_id": u.ID})
+		s.markSetupCompleted(ctx)
 		return nil
 	}
+
+	// 同名账号不存在：库里已有其他管理员说明是既有实例，无需再引导初始化。
+	// 此时 --reset-admin-password 兜底作用于最早创建的管理员，因为网页初始化的
+	// 用户名可能与 auth.username 不同。
+	if n, cerr := s.store.CountAdmins(ctx); cerr == nil && n > 0 {
+		if resetPassword && initPassword != "" {
+			if err := s.resetFirstAdminPassword(ctx, initPassword); err != nil {
+				return err
+			}
+		}
+		s.markSetupCompleted(ctx)
+		return nil
+	}
+
+	if initPassword == "" {
+		s.log.Info(logging.CatSystem, "app.bootstrap", "实例尚未初始化，等待通过网页创建管理员", nil)
+		return nil
+	}
+	hash, err := auth.HashPassword(initPassword)
 	if err != nil {
 		return err
 	}
-	role := models.RoleAdmin
-	enabled := true
-	if existing.Role != models.RoleAdmin || !existing.Enabled {
-		if err := s.store.UpdateUser(ctx, existing.ID, nil, &role, &enabled); err != nil {
-			return err
-		}
-		s.log.Info(logging.CatSystem, "app.bootstrap", "已校正管理员账号角色/状态", map[string]any{"username": username})
+	u, err := s.store.CreateUser(ctx, username, hash, models.RoleAdmin, true)
+	if err != nil {
+		return err
 	}
-	if resetPassword && strings.TrimSpace(s.cfg.Auth.InitPassword) != "" {
-		hash, herr := auth.HashPassword(s.cfg.Auth.InitPassword)
-		if herr != nil {
-			return herr
+	s.markSetupCompleted(ctx)
+	s.log.Info(logging.CatSystem, "app.bootstrap", "已按启动配置创建管理员账号", map[string]any{
+		"username": username, "user_id": u.ID,
+	})
+	return nil
+}
+
+// resetFirstAdminPassword 重置最早创建的管理员密码（无浏览器时的密码恢复路径）。
+func (s *AuthService) resetFirstAdminPassword(ctx context.Context, password string) error {
+	u, err := s.store.FirstAdmin(ctx)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil
 		}
-		if err := s.store.UpdateUser(ctx, existing.ID, &hash, nil, nil); err != nil {
-			return err
-		}
-		s.log.Info(logging.CatSystem, "app.bootstrap", "已重置管理员密码（来自启动配置）", map[string]any{"username": username})
+		return err
 	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	if err := s.store.UpdateUser(ctx, u.ID, &hash, nil, nil); err != nil {
+		return err
+	}
+	s.log.Info(logging.CatSystem, "app.bootstrap", "已重置管理员密码（来自启动配置）", map[string]any{
+		"username": u.Username, "user_id": u.ID,
+	})
 	return nil
 }
 

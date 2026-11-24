@@ -33,9 +33,11 @@ logging:
   frontend_upload_enabled: false
 
 auth:
-  # 管理员账号用户名
+  # 预置管理员的用户名（仅在提供 init_password / ADMIN_INIT_PASSWORD 时用于创建）
+  # 默认留空密码：首次访问网页时由引导页创建管理员，用户名可自行指定
   username: "admin"
-  # 初始密码建议用环境变量 ADMIN_INIT_PASSWORD 提供，不要提交到仓库
+  # 可选：填写后启动即创建管理员并跳过网页初始化；留空则走网页引导
+  # 如需重置已有管理员密码，配合 --reset-admin-password 使用（建议用环境变量提供）
   init_password: ""
   # 留空则自动生成并保存到 {data_dir}/jwt.secret
   jwt_secret: ""
