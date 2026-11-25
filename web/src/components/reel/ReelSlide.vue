@@ -35,7 +35,7 @@ const props = defineProps<{
   immersive?: boolean
   /** 播放器音量 0~1（全屏竖滑调节，父级持久化） */
   volume?: number
-  /** 首页第一条允许上滑刷新随机流 */
+  /** 首页第一条允许下拉刷新随机流 */
   allowRefresh?: boolean
 }>()
 
@@ -55,7 +55,7 @@ const emit = defineEmits<{
   (e: 'ended', key: string): void
   /** 进入/退出沉浸模式 */
   (e: 'toggle-immersive'): void
-  /** 首页第一条上滑刷新 */
+  /** 首页第一条下拉刷新 */
   (e: 'refresh'): void
   /** 全屏竖滑调节音量 */
   (e: 'volume-change', payload: { volume: number; muted: boolean }): void
@@ -186,7 +186,7 @@ let rateStartIndex = 0
 /**
  * 手势方向锁（参考 ZFPlayer / TigerVideoPlayer）：
  * - 全屏 / 沉浸：横向拖动快进，全屏纵向拖动调音量；
- * - 普通模式：纵向拖动切视频，首页第一条上滑刷新。
+ * - 普通模式：纵向拖动切视频，首页第一条下拉刷新。
  * 三种模式互斥，避免全屏切换视频导致黑屏串音。
  */
 type GestureMode = 'none' | 'seek' | 'volume'
@@ -967,7 +967,7 @@ function onGestureMove(event: PointerEvent) {
     return
   }
   if (!isFullscreen.value && Math.abs(dy) > 14) {
-    // 普通模式与非全屏沉浸保留纵向切换；首页第一条上滑刷新。
+    // 普通模式与非全屏沉浸保留纵向切换；首页第一条下拉刷新。
     // 全屏已由上面的音量手势接管，不会误切视频。
     clearPressTimer()
     swiping = true
@@ -1005,12 +1005,12 @@ function onGestureUp(event: PointerEvent) {
   if (swiping) {
     const dy = event.clientY - startY
     suppressNextClick = true
-    if (dy < -40) {
-      // 首页第一条上滑刷新；全屏/沉浸下不会触发（全屏已方向锁定为音量）。
+    if (dy > 40) {
+      // 首页第一条下拉刷新（抖音式）；全屏竖滑已被音量占用，不会误触发。
       if (props.allowRefresh && !isFullscreen.value) emit('refresh')
-      else emit('advance')
-    } else if (dy > 40) {
-      emit('retreat')
+      else emit('retreat')
+    } else if (dy < -40) {
+      emit('advance')
     }
     return
   }

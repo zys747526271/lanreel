@@ -288,7 +288,7 @@ function openList(path: string) {
   router.push(path)
 }
 
-/** 上滑刷新：排除当前整批重新随机，避免媒体库较小时刷到同一条看起来没反应。 */
+/** 下拉刷新：排除当前整批重新随机，避免媒体库较小时刷到同一条看起来没反应。 */
 let refreshingAt = 0
 async function refresh(fromGesture = false) {
   if (Date.now() - refreshingAt < 700) return
@@ -307,8 +307,8 @@ async function refresh(fromGesture = false) {
   maybeRecordHistory()
 }
 
-/* 首页上滑刷新的触摸兜底：控件区域会拦截 pointer 手势，
-   这里在滚动容器层补一套 touch 判定，确保第一条上滑一定能刷新（抖音式）。 */
+/* 首页下拉刷新的触摸兜底：控件区域会拦截 pointer 手势，
+   这里在滚动容器层补一套 touch 判定，确保第一条下拉一定能刷新（抖音式）。 */
 let touchStartY = 0
 let touchAt = 0
 function playerIsFullscreen() {
@@ -326,7 +326,7 @@ function onScrollerTouchEnd(event: TouchEvent) {
   if (!startedAt || !el || Date.now() - startedAt > 1500) return
   if (activeIndex.value !== 0 || el.scrollTop > 20 || immersive.value || playerIsFullscreen()) return
   const endY = event.changedTouches[0]?.clientY ?? touchStartY
-  if (touchStartY - endY > 60) void refresh(true)
+  if (endY - touchStartY > 60) void refresh(true)
 }
 
 async function loadConfig() {
