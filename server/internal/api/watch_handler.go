@@ -100,7 +100,8 @@ func (h *Handlers) handleMyWatchSummary(c *gin.Context) {
 func (h *Handlers) handleAdminMediaHeat(c *gin.Context) {
 	page := queryInt(c, "page", 1)
 	size := queryInt(c, "page_size", 10)
-	pageData, err := h.watch.MediaHeatPaged(c.Request.Context(), c.Query("sort"), queryDesc(c, true), page, size)
+	hideMissing := queryBool(c, "hide_missing", true)
+	pageData, err := h.watch.MediaHeatPaged(c.Request.Context(), c.Query("sort"), queryDesc(c, true), page, size, hideMissing)
 	if err != nil {
 		failService(c, err)
 		return

@@ -74,6 +74,8 @@ export interface HeatQuery {
   pageSize: number
   sort: HeatSortKey
   order: HeatOrder
+  /** 媒体热度表：是否隐藏文件已从扫描库移除的统计行，默认 true */
+  hideMissing?: boolean
 }
 
 function heatQuery(q: HeatQuery) {
@@ -83,6 +85,7 @@ function heatQuery(q: HeatQuery) {
     sort: q.sort,
     order: q.order,
   })
+  if (q.hideMissing !== undefined) params.set('hide_missing', q.hideMissing ? '1' : '0')
   return params.toString()
 }
 

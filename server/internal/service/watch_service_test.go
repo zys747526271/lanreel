@@ -73,7 +73,7 @@ func TestMediaHeatPagedMissingNames(t *testing.T) {
 
 	// 名称升序与播放升序都会把这些 0 播放的孤立统计排到前面，名称不能为空。
 	for _, sortKey := range []string{"name", "play", "heat"} {
-		page, err := svc.MediaHeatPaged(ctx, sortKey, false, 1, 10)
+		page, err := svc.MediaHeatPaged(ctx, sortKey, false, 1, 10, false)
 		if err != nil {
 			t.Fatalf("%s 升序查询失败: %v", sortKey, err)
 		}
@@ -90,7 +90,7 @@ func TestMediaHeatPagedMissingNames(t *testing.T) {
 		}
 	}
 
-	page, err := svc.MediaHeatPaged(ctx, "name", false, 1, 10)
+	page, err := svc.MediaHeatPaged(ctx, "name", false, 1, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestMediaHeatPagedDescendingIsStable(t *testing.T) {
 			 VALUES (?, 1, 0, 0, 0, ?, ?)`, key, now, now)
 	}
 	for _, sortKey := range []string{"name", "play", "heat", "complete", "watched", "favorite"} {
-		page, err := svc.MediaHeatPaged(ctx, sortKey, true, 1, 10)
+		page, err := svc.MediaHeatPaged(ctx, sortKey, true, 1, 10, false)
 		if err != nil {
 			t.Fatalf("%s 倒序查询失败: %v", sortKey, err)
 		}
@@ -161,5 +161,31 @@ func TestListMediaPathSnapshotsPrefersLatestHistory(t *testing.T) {
 	}
 	if snapshots["fav-only"] != "fav/仅收藏.mp4" {
 		t.Fatalf("收藏快照未补齐，得到 %q", snapshots["fav-only"])
+	}
+}
+
+func TestMediaHeatPagedHideMissing(t *testing.T) {
+	svc, db := newHeatTestService(t)
+	ctx := context.Background()
+	now := time.Now().Format(time.RFC3339)
+	// 空扫描快照表示这些统计都属于已移除文件。
+	for _, key := range []string{"gone-a", "gone-b", "gone-c"} {
+		heatTestExec(t, db,
+			`INSERT INTO media_stats(video_key, play_count, completed_count, watched_seconds, favorite_count, last_played_at, updated_at)
+			 VALUES (?, 0, 0, 0, 0, ?, ?)`, key, now, now)
+	}
+	shown, err := svc.MediaHeatPaged(ctx, "name", false, 1, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shown.Total != 3 || len(shown.Items) != 3 {
+		t.Fatalf("关闭隐藏时应返回 3 条, 得到 total=%d items=%d", shown.Total, len(shown.Items))
+	}
+	hidden, err := svc.MediaHeatPaged(ctx, "name", false, 1, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden.Total != 0 || len(hidden.Items) != 0 {
+		t.Fatalf("开启隐藏后 total/items 应为 0, 得到 total=%d items=%d", hidden.Total, len(hidden.Items))
 	}
 }

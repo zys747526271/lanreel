@@ -91,6 +91,19 @@ func queryInt(c *gin.Context, key string, def int) int {
 	return n
 }
 
+// queryBool 解析 1/0、true/false、yes/no、on/off，空值或非法值回退默认值。
+func queryBool(c *gin.Context, key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(c.Query(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
+}
+
 func queryDesc(c *gin.Context, def bool) bool {
 	v := strings.ToLower(strings.TrimSpace(c.Query("order")))
 	if v == "asc" {

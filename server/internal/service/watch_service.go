@@ -356,11 +356,21 @@ func pageSlice[T any](items []T, page, size int) []T {
 }
 
 // MediaHeatPaged 先按指定字段对全量媒体排序，再分页返回。
-func (s *WatchService) MediaHeatPaged(ctx context.Context, sortBy string, desc bool, page, size int) (HeatPage[MediaHeatView], error) {
+func (s *WatchService) MediaHeatPaged(ctx context.Context, sortBy string, desc bool, page, size int, hideMissing bool) (HeatPage[MediaHeatView], error) {
 	key, _ := normalizeHeatSort(sortBy, HeatSortHeat, HeatSortPlay, HeatSortComplete, HeatSortWatched, HeatSortFavorite, HeatSortName)
 	all, err := s.MediaHeat(ctx, 0)
 	if err != nil {
 		return HeatPage[MediaHeatView]{}, err
+	}
+	// 在排序和分页之前过滤，保证 total 与页码对应的是实际可见条目。
+	if hideMissing {
+		visible := make([]MediaHeatView, 0, len(all))
+		for _, v := range all {
+			if !v.Missing {
+				visible = append(visible, v)
+			}
+		}
+		all = visible
 	}
 	sort.SliceStable(all, func(i, j int) bool {
 		var less bool

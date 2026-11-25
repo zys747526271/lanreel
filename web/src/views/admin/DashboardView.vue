@@ -27,6 +27,8 @@ const pageSize = 10
 const total = ref(0)
 const sortKey = ref<Record<HeatTab, HeatSortKey>>({ media: 'heat', folder: 'heat', user: 'name' })
 const order = ref<Record<HeatTab, HeatOrder>>({ media: 'desc', folder: 'desc', user: 'asc' })
+// 媒体统计里已移除文件的历史行默认不显示；关闭开关可重新查看。
+const hideMissing = ref(true)
 
 const sortColumns: Record<HeatTab, Array<{ key: HeatSortKey; label: string }>> = {
   media: [
@@ -88,6 +90,7 @@ async function loadHeat() {
     pageSize,
     sort: sortKey.value[heatTab.value],
     order: order.value[heatTab.value],
+    hideMissing: hideMissing.value,
   }
   try {
     if (heatTab.value === 'media') {
@@ -113,6 +116,12 @@ async function loadHeat() {
 function switchTab(tab: HeatTab) {
   if (heatTab.value === tab) return
   heatTab.value = tab
+  page.value = 1
+  void loadHeat()
+}
+
+function toggleHideMissing(value: boolean) {
+  hideMissing.value = value
   page.value = 1
   void loadHeat()
 }
@@ -297,6 +306,10 @@ onMounted(async () => {
           size="small"
           @click="switchTab(t[0])"
         >{{ t[1] }}</n-button>
+        <label v-if="heatTab === 'media'" class="ml-2 flex items-center gap-1.5 text-[11px] text-slate-500">
+          <n-switch :value="hideMissing" size="small" @update:value="toggleHideMissing" />
+          隐藏已移除文件
+        </label>
         <span class="ml-auto text-[11px] text-slate-400">点击表头可对全量数据排序，再分页显示；点击行可跳转到对应管理页</span>
       </div>
 
