@@ -85,6 +85,12 @@ const router = createRouter({
           meta: { title: '概览' },
         },
         {
+          path: 'diagnostics',
+          name: 'admin-diagnostics',
+          component: () => import('@/views/admin/DiagnosticsView.vue'),
+          meta: { title: '系统诊断' },
+        },
+        {
           path: 'media',
           name: 'admin-media',
           component: () => import('@/views/admin/MediaSourcesView.vue'),

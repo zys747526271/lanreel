@@ -64,6 +64,10 @@ func (h *Handlers) Engine() *gin.Engine {
 		v1.GET("/health", h.handleHealth)
 		v1.GET("/config/public", h.publicConfig())
 
+		// 可播放策略变更事件（v0.3.1 实时同步）：所有在线客户端共用同一全局版本号。
+		v1.GET("/events/policy", h.handlePolicyEvents)
+		v1.GET("/events/policy/version", h.handlePolicyVersion)
+
 		// 首次部署引导：仅在未初始化时可用，创建第一个管理员
 		v1.GET("/setup/status", h.handleSetupStatus)
 		v1.POST("/setup/admin", h.handleSetupAdmin)
@@ -110,6 +114,7 @@ func (h *Handlers) Engine() *gin.Engine {
 		admin.Use(h.requireAuth(), h.requireAdmin())
 		{
 			admin.GET("/stats", h.handleAdminStats)
+			admin.GET("/diagnostics", h.handleAdminDiagnostics)
 			admin.POST("/scan", h.handleAdminScan)
 			admin.POST("/reset", h.handleAdminReset)
 

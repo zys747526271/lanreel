@@ -156,6 +156,8 @@ func (s *AdminService) ResetToInitial(ctx context.Context) error {
 	}
 	// 重建默认媒体目录快照，使初始化后看到的媒体库与首次部署一致。
 	s.media.scanner.SetRoots(s.cfg.Media.Roots)
+	// 策略表已清空，必须让判定器重读并通知在线客户端重新校验。
+	s.eval.Invalidate()
 	s.media.scanner.ScanAsync()
 	return nil
 }
@@ -602,6 +604,12 @@ type FileView struct {
 	GuestPlayable bool                 `json:"guest_playable"`
 	GuestReason   string               `json:"guest_reason,omitempty"`
 	Override      *models.FileOverride `json:"override,omitempty"`
+	// 观看统计：与文件夹策略页保持同一组指标，便于按热度决定是否调整策略。
+	HeatScore      float64 `json:"heat_score"`
+	PlayCount      int     `json:"play_count"`
+	CompletedCount int     `json:"completed_count"`
+	WatchedSeconds float64 `json:"watched_seconds"`
+	FavoriteCount  int     `json:"favorite_count"`
 }
 
 // ListFiles 文件列表（支持关键字与文件夹过滤）。
@@ -616,6 +624,13 @@ func (s *AdminService) ListFiles(ctx context.Context, admin *models.User, keywor
 	overrides, err := s.store.ListFileOverrides(ctx)
 	if err != nil {
 		return nil, 0, err
+	}
+	// 一次取出全量媒体统计，避免逐文件查询；列表本身已分页，开销可控。
+	statMap := map[string]models.MediaStats{}
+	if allStats, err := s.store.ListMediaStats(ctx, 0); err == nil {
+		for _, st := range allStats {
+			statMap[st.VideoKey] = st
+		}
 	}
 	items := s.media.SearchItems(keyword, 0)
 	if folder != "" {
@@ -655,6 +670,13 @@ func (s *AdminService) ListFiles(ctx context.Context, admin *models.User, keywor
 			// 后台以「策略本身是否放行」呈现，不受管理员绕过影响。
 			v.Playable, v.Reason = evaluateOverride(&o, s.cfg.Location, false)
 			v.GuestPlayable, v.GuestReason = evaluateOverride(&o, s.cfg.Location, true)
+		}
+		if st, ok := statMap[it.Key]; ok {
+			v.PlayCount = st.PlayCount
+			v.CompletedCount = st.CompletedCount
+			v.WatchedSeconds = st.WatchedSeconds
+			v.FavoriteCount = st.FavoriteCount
+			v.HeatScore = heatScore(st.PlayCount, st.CompletedCount, st.FavoriteCount, st.WatchedSeconds)
 		}
 		out = append(out, v)
 	}
@@ -991,6 +1013,8 @@ func (s *AdminService) UpdateMediaRootsEx(ctx context.Context, admin *models.Use
 		}
 	}
 	s.media.Scanner().SetRootsWithRecursive(clean, cleanRec)
+	// 目录变化会影响文件是否仍存在，触发客户端重查 /media/status。
+	s.eval.Invalidate()
 	s.media.Scanner().ScanAsync()
 	s.audit(ctx, admin, models.AuditTargetSetting, SettingMediaRoots, "更新媒体目录", before.Roots, clean)
 
@@ -1007,6 +1031,7 @@ func (s *AdminService) ResetMediaRoots(ctx context.Context, admin *models.User) 
 	}
 	roots := append([]string(nil), s.cfg.Media.Roots...)
 	s.media.Scanner().SetRoots(roots)
+	s.eval.Invalidate()
 	s.media.Scanner().ScanAsync()
 	s.audit(ctx, admin, models.AuditTargetSetting, SettingMediaRoots, "恢复媒体目录为配置文件", before.Roots, roots)
 

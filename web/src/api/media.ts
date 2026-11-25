@@ -32,3 +32,14 @@ export function fetchMediaStatus(keys: string[]) {
     quiet: true,
   })
 }
+
+/** 批量重查全部条目；服务端单次上限 200，这里自动分片去重。 */
+export async function fetchAllMediaStatus(keys: string[]): Promise<MediaStatus[]> {
+  const unique = [...new Set(keys.map((k) => k.trim()).filter(Boolean))]
+  const out: MediaStatus[] = []
+  for (let i = 0; i < unique.length; i += 200) {
+    const res = await fetchMediaStatus(unique.slice(i, i + 200))
+    out.push(...res.data)
+  }
+  return out
+}

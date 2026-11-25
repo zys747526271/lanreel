@@ -3,12 +3,14 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { useRoute, useRouter } from 'vue-router'
 import ReelSlide from '@/components/reel/ReelSlide.vue'
 import { listFavorites, removeFavorite } from '@/api/favorites'
+import { fetchAllMediaStatus } from '@/api/media'
 import { useAuthStore } from '@/stores/auth'
 import { useFavoritesStore } from '@/stores/favorites'
 import { formatDuration, reasonText } from '@/lib/format'
 import { prefs, exitFullscreen } from '@/lib/prefs'
 import { logger } from '@/lib/logger'
 import { pauseAllVideos } from '@/lib/playerRegistry'
+import { subscribePolicyChanges } from '@/lib/policyEvents'
 import {
   loadPlaySession,
   rememberPlayerRoute,
@@ -55,6 +57,8 @@ const viewActive = ref(true)
 let routeReady = false
 let lastRouteSignature = ''
 let toastTimer: number | null = null
+let stopPolicyEvents: (() => void) | null = null
+let policyTimer: number | null = null
 
 type SlideInstance = InstanceType<typeof ReelSlide>
 const slideRefs = new Map<string, SlideInstance>()
@@ -64,6 +68,8 @@ function setSlideRef(el: unknown, key: string) {
 }
 const currentItem = computed(() => items.value[activeIndex.value])
 const activeSlide = computed(() => slideRefs.get(currentItem.value?.key ?? ''))
+/** 用户主动滑动序号：策略异步重查期间若已换视频，就不再抢回位置。 */
+let userNavSeq = 0
 /** 需求 7：收藏按钮显示当前视频收藏数。 */
 const favoriteCount = computed(() => currentItem.value?.favorite_count ?? 0)
 
@@ -123,6 +129,7 @@ function onScroll() {
   if (index !== activeIndex.value) {
     flushCurrent()
     activeIndex.value = index
+    userNavSeq += 1
     const item = items.value[index]
     if (item) applyResume(item.key)
   }
@@ -359,11 +366,134 @@ async function focusRouteKey() {
   }
 }
 
+/**
+ * 当前条目不可播放时立即跳过，不依赖后台事件是否到达。
+ * 覆盖「进入前就已被禁用」与「策略变更时页面处于后台」两种情况。
+ */
+function skipBlockedCurrent(silent = false): boolean {
+  if (!routeReady || !viewActive.value) return false
+  const idx = activeIndex.value
+  const current = items.value[idx]
+  if (!current || current.playable) return false
+  activeSlide.value?.exitFullscreenOwned()
+  activeSlide.value?.pausePlayback()
+  pauseAllVideos()
+  let target = -1
+  for (let i = idx + 1; i < items.value.length; i += 1) {
+    if (items.value[i].playable) {
+      target = i
+      break
+    }
+  }
+  if (target < 0) target = items.value.findIndex((i) => i.playable)
+  if (target >= 0) {
+    activeIndex.value = target
+    applyResume(items.value[target].key)
+    saveSession()
+    void nextTick(() => scrollToIndex(target, false))
+    if (!silent) showToast('当前视频不可播放，已跳过')
+  }
+  return true
+}
+
+watch(
+  () => currentItem.value?.playable,
+  (playable) => {
+    if (playable === false) void nextTick(() => skipBlockedCurrent())
+  },
+)
+
+/**
+ * 后台策略变更后重查收藏/历史列表：当前条目被禁用时跳到下一条可播放视频，
+ * 被重新开放的条目则恢复模糊封面与播放能力。
+ */
+let lastPolicyVersion = 0
+function onPolicyVersion(version: number) {
+  if (version <= lastPolicyVersion) return
+  const initial = lastPolicyVersion === 0
+  lastPolicyVersion = version
+  requestPolicySync(initial)
+}
+
+let policySyncing = false
+let policySyncPending = false
+let policySyncPendingSilent = true
+let policySyncSeq = 0
+function requestPolicySync(silent = true) {
+  if (!viewActive.value) return
+  if (!routeReady || loading.value || policySyncing) {
+    policySyncPending = true
+    policySyncPendingSilent = policySyncPendingSilent && silent
+    return
+  }
+  void syncPolicyStatus(silent)
+}
+watch(loading, (value) => {
+  if (!value && policySyncPending && viewActive.value) {
+    const silent = policySyncPendingSilent
+    policySyncPending = false
+    policySyncPendingSilent = true
+    requestPolicySync(silent)
+  }
+})
+async function syncPolicyStatus(silent = true) {
+  if (!viewActive.value || !routeReady || policySyncing || loading.value || !items.value.length) return
+  const seq = ++policySyncSeq
+  const startIndex = activeIndex.value
+  const navSeq = userNavSeq
+  policySyncing = true
+  try {
+    const statuses = await fetchAllMediaStatus(items.value.map((i) => i.key))
+    if (seq !== policySyncSeq || !viewActive.value) return
+    const statusMap = new Map(statuses.map((s) => [s.key, s]))
+    const current = items.value[startIndex]
+    const currentKey = current?.key
+    const currentBlocked = !!currentKey && statusMap.get(currentKey)?.playable === false
+    const wasBlocked = !!current && !current.playable
+
+    if (currentBlocked) flushCurrent()
+    // 先恢复续播秒数，再改 playable；否则组件先 activate 会从 0 秒开始。
+    // 用户若在异步重查期间已滑走，则不要拿旧视频的进度污染当前项。
+    if (currentKey && wasBlocked && navSeq === userNavSeq) applyResume(currentKey)
+    items.value = items.value.map((i) => {
+      const s = statusMap.get(i.key)
+      if (!s) return i
+      return { ...i, playable: s.playable, reason: s.playable ? undefined : s.reason }
+    })
+    await nextTick()
+    if (seq !== policySyncSeq || !viewActive.value) return
+
+    // 用户在重查期间手动滑动，或当前项已被 watcher 自动跳过：不再抢走位置。
+    if (userNavSeq !== navSeq || activeIndex.value !== startIndex) {
+      saveSession()
+      return
+    }
+
+    if (currentBlocked) {
+      skipBlockedCurrent(silent)
+      return
+    }
+  } catch (err) {
+    logger.warn('app', 'policy', '刷新媒体可播放状态失败', { error: err instanceof Error ? err.message : String(err) })
+  } finally {
+    policySyncing = false
+    if (policySyncPending && viewActive.value) {
+      const silent = policySyncPendingSilent
+      policySyncPending = false
+      policySyncPendingSilent = true
+      requestPolicySync(silent)
+    }
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('keyup', onKeyup)
   window.addEventListener('blur', stopSeek)
   window.addEventListener('resize', onResize)
+  stopPolicyEvents = subscribePolicyChanges(onPolicyVersion)
+  // 时间窗口到期或文件丢失不会产生后台策略写事件，按低频重查兜底。
+  policyTimer = window.setInterval(() => requestPolicySync(true), 30000)
   rememberPlayerRoute(route.fullPath)
   pauseAllVideos()
   if (!auth.isLoggedIn) {
@@ -394,6 +524,10 @@ onMounted(async () => {
   if (prefs.autoFullscreen) void activeSlide.value?.toggleFullscreen(prefs.autoRotate)
   routeReady = true
   lastRouteSignature = currentRouteSignature()
+  if (policySyncPending) {
+    policySyncPending = false
+    requestPolicySync()
+  }
   logger.info('app', 'player', '进入列表播放', { src: src.value, count: items.value.length, resume: pendingResumeTime.value })
 })
 
@@ -437,6 +571,7 @@ function onViewActivated() {
     if (resumeOnActivate) activeSlide.value?.resume()
     resumeOnActivate = false
   })
+  requestPolicySync()
 }
 onDeactivated(onViewDeactivated)
 onActivated(onViewActivated)
@@ -452,6 +587,10 @@ onBeforeUnmount(() => {
   saveSession()
   pauseAllVideos()
   void exitFullscreen()
+  stopPolicyEvents?.()
+  stopPolicyEvents = null
+  if (policyTimer !== null) window.clearInterval(policyTimer)
+  policyTimer = null
   if (toastTimer) window.clearTimeout(toastTimer)
 })
 </script>

@@ -93,6 +93,10 @@ export interface DailyWatchSummary {
 export interface HeatView {
   key?: string
   rel_path?: string
+  /** 服务端补全的显示名，文件已移除时仍可辨认 */
+  display_name?: string
+  /** 文件已从扫描库移除，仅保留统计 */
+  missing?: boolean
   folder: string
   root_index: number
   root_name?: string
@@ -104,6 +108,36 @@ export interface HeatView {
   last_played_at?: string
   heat_score: number
   media_count?: number
+}
+
+export interface UserHeatRow {
+  user_id: number
+  username: string
+  watched_videos: number
+  completed_videos: number
+  total_watch_time: number
+  last_played_at: string
+}
+
+export interface HeatPage<T> {
+  data: T[]
+  meta: { total: number; page: number; page_size: number }
+}
+
+export interface DiagnosticCheck {
+  id: string
+  name: string
+  status: 'ok' | 'warn' | 'error'
+  summary: string
+  detail?: string
+  suggestion?: string
+}
+
+export interface DiagnosticReport {
+  checked_at: string
+  healthy: boolean
+  counts: Record<'ok' | 'warn' | 'error', number>
+  checks: DiagnosticCheck[]
 }
 
 export interface PublicConfig {
@@ -177,6 +211,12 @@ export interface FileView {
   guest_playable: boolean
   guest_reason?: string
   override?: FileOverride
+  /** 观看统计（与文件夹策略页同组指标） */
+  heat_score: number
+  play_count: number
+  completed_count: number
+  watched_seconds: number
+  favorite_count: number
 }
 
 export interface UserView extends User {

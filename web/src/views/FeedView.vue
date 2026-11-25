@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ReelSlide from '@/components/reel/ReelSlide.vue'
+import { fetchAllMediaStatus } from '@/api/media'
 import { useFeedStore } from '@/stores/feed'
 import { useAuthStore } from '@/stores/auth'
 import { useFavoritesStore } from '@/stores/favorites'
@@ -10,6 +11,7 @@ import { reasonText } from '@/lib/format'
 import { prefs } from '@/lib/prefs'
 import { loadFeedSession, rememberPlayerRoute, saveFeedSession } from '@/lib/session'
 import { pauseAllVideos } from '@/lib/playerRegistry'
+import { subscribePolicyChanges } from '@/lib/policyEvents'
 import {
   flush as flushProgress,
   isWatchedThrough,
@@ -43,6 +45,8 @@ const immersive = ref(false)
 /** KeepAlive 切走后为 false，阻止后台页面自动播放（v0.3.1）。 */
 const viewActive = ref(true)
 let toastTimer: number | null = null
+let stopPolicyEvents: (() => void) | null = null
+let policyTimer: number | null = null
 
 type SlideInstance = InstanceType<typeof ReelSlide>
 /** 按 key 索引，列表重新随机/重排后不会拿到旧索引上的播放器实例。 */
@@ -51,7 +55,10 @@ function setSlideRef(el: unknown, key: string) {
   if (el) slideRefs.set(key, el as SlideInstance)
   else slideRefs.delete(key)
 }
-const currentItem = computed(() => feed.items[activeIndex.value])
+/** 随机流只展示当前策略允许的条目；禁用项留在 store 中，开放后可即时恢复。 */
+const visibleItems = computed(() => feed.items.filter((i) => i.playable))
+const feedEmpty = computed(() => !routeLoading.value && !feed.loading && !visibleItems.value.length && !feed.hasMore)
+const currentItem = computed(() => visibleItems.value[activeIndex.value])
 const activeSlide = computed(() => slideRefs.get(currentItem.value?.key ?? ''))
 /** 需求 7：收藏按钮显示当前视频的收藏数，而非全站/本人总数。 */
 const favoriteCount = computed(() => currentItem.value?.favorite_count ?? 0)
@@ -104,18 +111,21 @@ function onScroll() {
   const index = Math.round(el.scrollTop / slideHeight())
   if (index !== activeIndex.value) {
     activeIndex.value = index
+    userNavSeq += 1
     // 恢复进度只对进入时的那一条生效，切换后不再回跳。
     pendingResumeTime.value = null
-    if (index >= feed.items.length - 3) void feed.loadMore(5)
+    if (index >= visibleItems.value.length - 3) void feed.loadMore(5)
     maybeRecordHistory()
   }
 }
 
 /** 停留切换时：把上一条的进度强制上报（历史由服务端按用户隔离，进度即历史来源）。 */
 let lastActiveKey = ''
+/** 用户主动滑动序号：策略异步重查期间若用户已换视频，就不再抢回位置。 */
+let userNavSeq = 0
 function maybeRecordHistory() {
   const prev = lastActiveKey
-  const now = feed.items[activeIndex.value]?.key ?? ''
+  const now = visibleItems.value[activeIndex.value]?.key ?? ''
   lastActiveKey = now
   if (!prev || prev === now || !auth.isLoggedIn) return
   // 上一条离开时补一次上报，确保切换视频也能留下进度。
@@ -125,7 +135,7 @@ function maybeRecordHistory() {
 }
 
 function next() {
-  if (activeIndex.value < feed.items.length - 1) scrollToIndex(activeIndex.value + 1)
+  if (activeIndex.value < visibleItems.value.length - 1) scrollToIndex(activeIndex.value + 1)
   else void feed.loadMore(5)
 }
 
@@ -204,7 +214,7 @@ function onProgress(payload: {
 }) {
   positions.value[payload.key] = payload.current
   // 只处理真实播放中的条目；预加载邻居的视频不会写历史。
-  if (auth.isLoggedIn && payload.key === feed.items[activeIndex.value]?.key) {
+  if (auth.isLoggedIn && payload.key === visibleItems.value[activeIndex.value]?.key) {
     trackProgress(payload, feed.items.find((i) => i.key === payload.key))
   }
 }
@@ -213,7 +223,7 @@ function onProgress(payload: {
 function applyRandomStartPolicy(restored: boolean) {
   // 从设置/后台返回：沿用会话恢复进度，不改。
   if (restored) return
-  const item = feed.items[activeIndex.value]
+  const item = visibleItems.value[activeIndex.value]
   if (!auth.isLoggedIn || !prefs.randomRestartWatched) {
     // 未登录没有服务端进度；或用户选择续播：用快照位置续播（看完的仍从头）。
     if (item) pendingResumeTime.value = resumePosition(item.key) || null
@@ -227,13 +237,13 @@ function applyRandomStartPolicy(restored: boolean) {
 /** 视频自然结束且 endAction=next 时切到下一条；没有下一条就重播，绝不停在黑屏。 */
 function onEnded(_key: string) {
   if (prefs.endAction !== 'next') return
-  if (activeIndex.value < feed.items.length - 1) {
+  if (activeIndex.value < visibleItems.value.length - 1) {
     next()
     return
   }
   if (feed.hasMore && !feed.loading) {
     void feed.loadMore(5).then(() => nextTick(() => {
-      if (activeIndex.value < feed.items.length - 1) next()
+      if (activeIndex.value < visibleItems.value.length - 1) next()
       else activeSlide.value?.replayFromStart()
     }))
     return
@@ -242,8 +252,8 @@ function onEnded(_key: string) {
 }
 
 function saveSession() {
-  if (routeLoading.value || !feed.items.length) return
-  const item = feed.items[activeIndex.value]
+  if (routeLoading.value || !visibleItems.value.length) return
+  const item = visibleItems.value[activeIndex.value]
   if (item && auth.isLoggedIn) {
     const t = activeSlide.value?.getCurrentTime()
     const dur = item.duration || 0
@@ -255,7 +265,7 @@ function saveSession() {
   const sessionKey = auth.user ? `u${auth.user.id}` : 'guest'
   saveFeedSession({
     sessionKey,
-    items: feed.items,
+    items: visibleItems.value,
     activeIndex: activeIndex.value,
     positions: { ...positions.value },
   })
@@ -308,8 +318,145 @@ async function refresh(fromGesture = false) {
   if (fromGesture) showToast('已刷新随机列表')
   await nextTick()
   scrollToIndex(0, false)
-  lastActiveKey = feed.items[0]?.key ?? ''
+  lastActiveKey = visibleItems.value[0]?.key ?? ''
   maybeRecordHistory()
+}
+
+/**
+ * 后台策略变更：重查整批媒体状态，禁用当前视频时跳到下一个可播放项；
+ * 已加载后被禁用又重新开放的条目会自动恢复显示。
+ */
+let lastPolicyVersion = 0
+function onPolicyVersion(version: number) {
+  if (version <= lastPolicyVersion) return
+  const initial = lastPolicyVersion === 0
+  lastPolicyVersion = version
+  // 首帧只是同步版本，不代表后台刚刚改了策略，不需要并入新视频。
+  // 真实变更：除了重查已加载条目的状态，还要把新开放的可播放视频拉进随机流。
+  const refreshAvailable = !initial
+  if (!viewActive.value && refreshAvailable) {
+    // 页面在后台（如用户在管理端操作）时先记账，回到浏览页再补做。
+    policySyncPending = true
+    policySyncPendingRefresh = true
+    return
+  }
+  requestPolicySync(initial, refreshAvailable)
+}
+
+let policySyncing = false
+let policySyncPending = false
+let policySyncPendingSilent = true
+let policySyncPendingRefresh = false
+let policySyncSeq = 0
+function requestPolicySync(silent = true, refreshAvailable = false) {
+  if (!viewActive.value) return
+  if (routeLoading.value || feed.loading || policySyncing) {
+    policySyncPending = true
+    policySyncPendingSilent = policySyncPendingSilent && silent
+    policySyncPendingRefresh = policySyncPendingRefresh || refreshAvailable
+    return
+  }
+  void syncPolicyStatus(silent, refreshAvailable)
+}
+/** 把阻塞期间合并的策略同步请求放行，保留 refresh 标记不丢。 */
+function flushPendingPolicySync() {
+  if (!policySyncPending || !viewActive.value) return
+  const silent = policySyncPendingSilent
+  const refreshAvailable = policySyncPendingRefresh
+  policySyncPending = false
+  policySyncPendingSilent = true
+  policySyncPendingRefresh = false
+  requestPolicySync(silent, refreshAvailable)
+}
+watch(() => feed.loading, (loading) => {
+  if (!loading) flushPendingPolicySync()
+})
+async function syncPolicyStatus(silent = true, refreshAvailable = false) {
+  if (!viewActive.value || routeLoading.value || policySyncing || feed.loading || !feed.items.length) return
+  const seq = ++policySyncSeq
+  // 用「用户此刻真正看到的 key」做锚点，而不是数字下标：
+  // 异步期间列表会被过滤/合并，数字下标会错位，key 不会。
+  const beforeKeys = visibleItems.value.map((i) => i.key)
+  const viewedKey = lastActiveKey || beforeKeys[activeIndex.value]
+  policySyncing = true
+  try {
+    const statuses = await fetchAllMediaStatus(feed.items.map((i) => i.key))
+    if (seq !== policySyncSeq || !viewActive.value) return
+    const statusMap = new Map(statuses.map((s) => [s.key, s]))
+    const isBlocked = (key?: string) => !!key && statusMap.get(key)?.playable === false
+    // 状态请求返回后再取一次当前 key：异步期间用户可能已滑到下一条。
+    const anchorNow = lastActiveKey || viewedKey
+    const blockedAnchor = isBlocked(anchorNow)
+    if (blockedAnchor) {
+      activeSlide.value?.exitFullscreenOwned()
+      activeSlide.value?.pausePlayback()
+      pauseAllVideos()
+    }
+
+    feed.patchPolicyStatuses(statuses)
+
+    // 管理员「开放」策略时，新视频此前从未进入随机流，状态重查查不到它们。
+    // 主动拉一批当前可播放媒体并入列表，用户无需等视频播完或手动刷新。
+    let addedNew = 0
+    if (refreshAvailable) {
+      feed.reopenHasMore()
+      try {
+        addedNew = await feed.mergeAvailable(20)
+        if (addedNew > 0 && auth.isLoggedIn) feed.applyFavoriteKeys(favorites.keys)
+      } catch (err) {
+        logger.warn('app', 'policy', '并入新开放媒体失败', { error: err instanceof Error ? err.message : String(err) })
+      }
+      if (seq !== policySyncSeq || !viewActive.value) return
+    }
+
+    await nextTick()
+    if (seq !== policySyncSeq || !viewActive.value) return
+
+    // 若用户在异步重查期间滑到了别的视频，以 lastActiveKey（由 onScroll 实时维护）为准，
+    // 不把用户强行拉回旧位置；否则回到重查开始时正在看的视频。
+    const currentKey = lastActiveKey || anchorNow
+    let targetKey: string | undefined = currentKey
+    let targetIndex = targetKey ? visibleItems.value.findIndex((i) => i.key === targetKey) : -1
+    if (targetIndex < 0) {
+      // 当前项被过滤掉（被禁用）：从「它此刻的原位置」往后找下一条仍可播放的项，
+      // 而不是从同步开始时的位置找，避免用户滑动后往回跳一条。
+      const currentOldIndex = currentKey ? beforeKeys.indexOf(currentKey) : -1
+      const from = currentOldIndex >= 0 ? currentOldIndex : beforeKeys.indexOf(anchorNow)
+      for (let i = from + 1; i < beforeKeys.length; i += 1) {
+        const key = beforeKeys[i]
+        if (visibleItems.value.some((item) => item.key === key)) {
+          targetKey = key
+          targetIndex = visibleItems.value.findIndex((item) => item.key === key)
+          break
+        }
+      }
+    }
+    if (targetIndex < 0) {
+      const fallbackIndex = currentKey ? beforeKeys.indexOf(currentKey) : -1
+      const base = fallbackIndex >= 0 ? fallbackIndex : Math.max(beforeKeys.indexOf(anchorNow), 0)
+      targetIndex = Math.min(base, Math.max(visibleItems.value.length - 1, 0))
+    }
+    activeIndex.value = targetIndex
+    pendingResumeTime.value = null
+    lastActiveKey = visibleItems.value[targetIndex]?.key ?? ''
+    scrollToIndex(targetIndex, false)
+    saveSession()
+    // 刚并入新视频时不必再补拉一批，避免把旧 key 以新 uid 重复追加。
+    const justMerged = refreshAvailable && addedNew > 0
+    if (!justMerged) {
+      if (!visibleItems.value.length && feed.hasMore && !feed.loading) void feed.loadMore(8)
+      else if (visibleItems.value.length < 4 && feed.hasMore && !feed.loading) void feed.loadMore(5)
+    }
+    if (!silent) {
+      if (blockedAnchor) showToast('播放策略已更新，已跳过不可播放视频')
+      else if (addedNew > 0) showToast(`播放策略已更新，已加入 ${addedNew} 个新视频`)
+    }
+  } catch (err) {
+    logger.warn('app', 'policy', '刷新媒体可播放状态失败', { error: err instanceof Error ? err.message : String(err) })
+  } finally {
+    policySyncing = false
+    flushPendingPolicySync()
+  }
 }
 
 /* 首页下拉刷新的触摸兜底：控件区域会拦截 pointer 手势，
@@ -354,6 +501,9 @@ onMounted(async () => {
   window.addEventListener('keyup', onKeyup)
   window.addEventListener('blur', stopSeek)
   window.addEventListener('resize', onResize)
+  stopPolicyEvents = subscribePolicyChanges(onPolicyVersion)
+  // 时间窗口到期、文件丢失等没有后台写操作时，靠低频重查兜底。
+  policyTimer = window.setInterval(() => requestPolicySync(true), 30000)
   // 注意：刷新由 main.ts 的导航类型判断处理；
   // 这里只负责 SPA 内路由离开时的保存（onBeforeUnmount）。
   rememberPlayerRoute(route.fullPath)
@@ -386,8 +536,9 @@ onMounted(async () => {
   routeLoading.value = false
   await nextTick()
   scrollToIndex(activeIndex.value, false)
-  lastActiveKey = feed.items[activeIndex.value]?.key ?? ''
+  lastActiveKey = visibleItems.value[activeIndex.value]?.key ?? ''
   maybeRecordHistory()
+  flushPendingPolicySync()
   logger.info('app', 'feed', '进入浏览页', {
     guest: !auth.isLoggedIn,
     restored: !!saved,
@@ -425,6 +576,7 @@ function onViewActivated() {
     if (resumeOnActivate) activeSlide.value?.resume()
     resumeOnActivate = false
   })
+  requestPolicySync()
 }
 onDeactivated(onViewDeactivated)
 onActivated(onViewActivated)
@@ -439,6 +591,10 @@ onBeforeUnmount(() => {
   setImmersive(false)
   saveSession()
   pauseAllVideos()
+  stopPolicyEvents?.()
+  stopPolicyEvents = null
+  if (policyTimer !== null) window.clearInterval(policyTimer)
+  policyTimer = null
   if (toastTimer) window.clearTimeout(toastTimer)
 })
 </script>
@@ -522,7 +678,7 @@ onBeforeUnmount(() => {
       @touchend.passive="onScrollerTouchEnd"
     >
       <section
-        v-for="(item, index) in feed.items"
+        v-for="(item, index) in visibleItems"
         :key="item.uid ?? item.key"
         class="relative h-full w-full snap-start snap-always"
       >
@@ -565,7 +721,7 @@ onBeforeUnmount(() => {
 
     <!-- 空状态 -->
     <div
-      v-if="!routeLoading && feed.isEmpty"
+      v-if="feedEmpty"
       class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-black/92 px-8 text-center"
     >
       <svg class="h-12 w-12 text-white/35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NInputNumber, NSpin, NSwitch, useMessage } from 'naive-ui'
-import { getLoggingSettings, setLoggingSettings, setRegistration } from '@/api/admin'
+import { NButton, NCard, NInput, NInputNumber, NModal, NSpin, NSwitch, useMessage } from 'naive-ui'
+import { getLoggingSettings, resetToInitial, setLoggingSettings, setRegistration } from '@/api/admin'
 import { fetchPublicConfig } from '@/api/client'
 import type { LoggingSettings, PublicConfig } from '@/api/types'
 
@@ -12,6 +12,10 @@ const savingLogging = ref(false)
 const registrationOpen = ref(false)
 const savingRegistration = ref(false)
 const config = ref<PublicConfig | null>(null)
+const resetModal = ref(false)
+const resetConfirm = ref('')
+const resetting = ref(false)
+
 const logging = ref<LoggingSettings>({
   retention_days: 30,
   max_entries: 200000,
@@ -59,12 +63,32 @@ async function toggleRegistration(value: boolean) {
   }
 }
 
+async function confirmReset() {
+  if (resetConfirm.value.trim() !== '确认初始化') {
+    message.error('请输入「确认初始化」')
+    return
+  }
+  resetting.value = true
+  try {
+    await resetToInitial(resetConfirm.value.trim())
+    resetModal.value = false
+    resetConfirm.value = ''
+    message.success('已恢复初始化，即将进入首次部署')
+    window.setTimeout(() => window.location.assign('/setup'), 600)
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '恢复初始化失败')
+  } finally {
+    resetting.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
 <template>
-  <n-spin :show="loading">
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+  <div class="space-y-4">
+    <n-spin :show="loading">
+      <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <n-card title="注册与访问" size="small">
         <div class="space-y-4 text-sm">
           <div class="flex items-center justify-between">
@@ -118,7 +142,30 @@ onMounted(load)
             <n-button type="primary" :loading="savingLogging" @click="saveLogging">保存日志配置</n-button>
           </div>
         </div>
-      </n-card>
-    </div>
-  </n-spin>
+        </n-card>
+      </div>
+    </n-spin>
+
+    <n-card title="危险操作" size="small" class="border-red-200">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div class="text-xs text-slate-500">
+          <p class="font-medium text-red-600">恢复初始化</p>
+          <p class="mt-1">清空所有账号、收藏、历史、策略、统计与日志，回到首次部署状态。不会删除媒体文件。</p>
+        </div>
+        <n-button type="error" strong @click="resetModal = true">恢复初始化</n-button>
+      </div>
+    </n-card>
+
+    <n-modal v-model:show="resetModal" preset="card" title="恢复初始化" class="max-w-md" :bordered="false">
+      <div class="space-y-3 text-sm">
+        <p class="text-red-600">此操作不可撤销！所有用户与业务数据都会被清空。</p>
+        <p class="text-xs text-slate-500">请输入「确认初始化」以继续：</p>
+        <n-input v-model:value="resetConfirm" placeholder="确认初始化" />
+        <div class="flex justify-end gap-2 pt-1">
+          <n-button @click="resetModal = false">取消</n-button>
+          <n-button type="error" strong :loading="resetting" @click="confirmReset">确认恢复</n-button>
+        </div>
+      </div>
+    </n-modal>
+  </div>
 </template>

@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { fetchRandom, type FeedMode } from '@/api/media'
+import { fetchRandom, type FeedMode, type MediaStatus } from '@/api/media'
 import { logger } from '@/lib/logger'
 import type { MediaItem } from '@/api/types'
 
@@ -70,6 +70,57 @@ export const useFeedStore = defineStore('feed', () => {
     await loadMore(8)
   }
 
+  /** 策略变更后刷新条目的可播放状态；禁用项保留在列表中但由视图隐藏，开放后可自动恢复。 */
+  function patchPolicyStatuses(statuses: MediaStatus[]) {
+    const map = new Map(statuses.map((s) => [s.key, s]))
+    items.value = items.value.map((i) => {
+      const s = map.get(i.key)
+      if (!s) return i
+      return { ...i, playable: s.playable, reason: s.playable ? undefined : s.reason }
+    })
+  }
+
+  /**
+   * 策略「开放」后把新变为可播放、但尚未进入过随机流的媒体并入列表。
+   * 随机流只返回加载时可播放的条目，被管理员禁用的视频根本不在 items 里，
+   * 因此只重查已加载 key 的状态无法发现它们；必须主动拉一批当前可播放的媒体。
+   * 以全部已知 key 作为 exclude，重复调用会自然收敛，不会无限追加。
+   */
+  async function mergeAvailable(count = 20): Promise<number> {
+    // 状态重查期间用户若滚动触发了 loadMore，先等它结束再取快照，避免并发写列表。
+    let waited = 0
+    while (loading.value && waited < 40) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50))
+      waited += 1
+    }
+    if (loading.value) return 0
+    const exclude = items.value.map((i) => i.key)
+    loading.value = true
+    // 超时中止，避免单个请求挂起导致 loading 长期为 true、阻塞 loadMore 与后续策略同步。
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 10000)
+    try {
+      const res = await fetchRandom({ limit: count, exclude, mode: mode.value, signal: controller.signal })
+      const known = new Set(items.value.map((i) => i.key))
+      const stamp = Date.now()
+      const fresh = res.data
+        .filter((i) => !known.has(i.key))
+        .map((i, idx) => ({ ...i, uid: `${i.key}-${stamp}-${idx}` }))
+      if (fresh.length) items.value.push(...fresh)
+      logger.debug('app', 'feed', '策略开放后并入可播放媒体', { added: fresh.length })
+      return fresh.length
+    } finally {
+      window.clearTimeout(timeout)
+      loading.value = false
+    }
+  }
+
+  /** 策略开放后恢复继续加载能力：此前可能因空结果被标记为「没有更多」。 */
+  function reopenHasMore() {
+    hasMore.value = true
+    error.value = ''
+  }
+
   function patchFavorite(key: string, favorite: boolean) {
     items.value = items.value.map((i) => (i.key === key ? { ...i, favorite } : i))
   }
@@ -83,5 +134,8 @@ export const useFeedStore = defineStore('feed', () => {
     items.value = items.value.filter((i) => i.key !== key)
   }
 
-  return { items, mode, loading, error, hasMore, isEmpty, loadMore, reset, restore, setMode, patchFavorite, applyFavoriteKeys, removeKey }
+  return {
+    items, mode, loading, error, hasMore, isEmpty, loadMore, reset, restore, setMode,
+    patchPolicyStatuses, mergeAvailable, reopenHasMore, patchFavorite, applyFavoriteKeys, removeKey,
+  }
 })

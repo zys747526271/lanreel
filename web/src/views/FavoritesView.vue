@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import MediaGrid from '@/components/media/MediaGrid.vue'
 import { batchRemoveFavorites, cleanMissingFavorites, listFavorites, removeFavorite } from '@/api/favorites'
+import { fetchAllMediaStatus } from '@/api/media'
 import { useAuthStore } from '@/stores/auth'
 import { reasonText } from '@/lib/format'
 import { logger } from '@/lib/logger'
 import { rememberPlayerRoute } from '@/lib/session'
 import { getSnapshot, loadProgressMap } from '@/lib/progress'
+import { subscribePolicyChanges } from '@/lib/policyEvents'
 import type { MediaItem } from '@/api/types'
 
 const router = useRouter()
@@ -121,6 +123,28 @@ async function removeMissing() {
   }
 }
 
+let stopPolicyEvents: (() => void) | null = null
+let statusTimer: number | null = null
+let statusSyncing = false
+/** 后台策略变更后同步网格模糊状态，无需用户重新进入页面。 */
+async function syncStatus() {
+  if (statusSyncing || !items.value.length) return
+  statusSyncing = true
+  try {
+    const statuses = await fetchAllMediaStatus(items.value.map((i) => i.key))
+    const map = new Map(statuses.map((s) => [s.key, s]))
+    items.value = items.value.map((i) => {
+      const s = map.get(i.key)
+      if (!s) return i
+      return { ...i, playable: s.playable, reason: s.playable ? undefined : s.reason }
+    })
+  } catch (err) {
+    logger.warn('app', 'policy', '刷新收藏可播放状态失败', { error: err instanceof Error ? err.message : String(err) })
+  } finally {
+    statusSyncing = false
+  }
+}
+
 function restoreScroll() {
   const saved = Number(sessionStorage.getItem(SCROLL_KEY) ?? 0)
   if (!saved) return
@@ -137,7 +161,16 @@ onMounted(async () => {
     return
   }
   await load()
+  stopPolicyEvents = subscribePolicyChanges(() => void syncStatus())
+  statusTimer = window.setInterval(() => void syncStatus(), 60000)
   restoreScroll()
+})
+
+onBeforeUnmount(() => {
+  stopPolicyEvents?.()
+  stopPolicyEvents = null
+  if (statusTimer !== null) window.clearInterval(statusTimer)
+  statusTimer = null
 })
 
 // 保留 keep-alive 场景（后续若启用页面缓存）下的刷新能力。

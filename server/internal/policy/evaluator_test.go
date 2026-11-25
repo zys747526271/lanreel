@@ -29,6 +29,27 @@ func (f *fakeSource) ListFileOverrides(context.Context) (map[string]models.FileO
 	return f.files, nil
 }
 
+// gateSource 模拟读取策略期间管理员写入，用于验证 load 不会把旧策略写回缓存。
+type gateSource struct {
+	entered chan struct{}
+	release chan struct{}
+	folders []models.FolderPolicy
+}
+
+func (f *gateSource) ListFolderPolicies(context.Context) ([]models.FolderPolicy, error) {
+	f.entered <- struct{}{}
+	<-f.release
+	return f.folders, nil
+}
+
+func (f *gateSource) GetFileOverride(context.Context, string) (*models.FileOverride, error) {
+	return nil, nil
+}
+
+func (f *gateSource) ListFileOverrides(context.Context) (map[string]models.FileOverride, error) {
+	return map[string]models.FileOverride{}, nil
+}
+
 func TestInWindow(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
 	at := func(h, m int) time.Time { return time.Date(2026, 3, 1, h, m, 0, 0, loc) }
@@ -177,6 +198,86 @@ func TestEvaluateMultiRootIsolation(t *testing.T) {
 	}
 	if d := e.Evaluate(context.Background(), root1, Viewer{}, now); !d.Playable {
 		t.Fatalf("root1 的同名 sub 不应受影响，实际 %+v", d)
+	}
+}
+
+// TestInvalidateDuringLoadDiscardsStalePolicies 防止读到一半的旧策略覆盖新缓存。
+func TestInvalidateDuringLoadDiscardsStalePolicies(t *testing.T) {
+	src := &gateSource{
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+		folders: []models.FolderPolicy{{
+			RootIndex: 0, FolderPath: "", Enabled: false, ScheduleType: models.ScheduleDisabled,
+		}},
+	}
+	e := NewEvaluator(src, time.Local, nil)
+	it := &media.Item{Key: "k", RelPath: "a.mp4"}
+	result := make(chan Decision, 1)
+	go func() {
+		result <- e.Evaluate(context.Background(), it, Viewer{}, time.Now())
+	}()
+
+	<-src.entered
+	// 数据库已改为默认允许，同时广播失效；正在读取的旧列表必须被丢弃。
+	src.folders = nil
+	e.Invalidate()
+	close(src.release)
+
+	select {
+	case d := <-result:
+		if !d.Playable {
+			t.Fatalf("失效后的读取不应写回旧禁用策略，实际 %+v", d)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("判定未在限定时间内完成")
+	}
+}
+
+// TestPolicyChangeSubscription Invalidate 必须递增版本并通知所有订阅者。
+func TestPolicyChangeSubscription(t *testing.T) {
+	e := NewEvaluator(&fakeSource{}, time.Local, nil)
+	ch1, done1 := e.Subscribe()
+	defer done1()
+	ch2, done2 := e.Subscribe()
+	defer done2()
+
+	before := e.Version()
+	e.Invalidate()
+	for i, ch := range []<-chan Change{ch1, ch2} {
+		select {
+		case change := <-ch:
+			if change.Version != before+1 {
+				t.Fatalf("订阅者 %d 收到版本 %d，期望 %d", i, change.Version, before+1)
+			}
+			if change.ChangedAt.IsZero() {
+				t.Fatalf("订阅者 %d 缺少变更时间", i)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("订阅者 %d 未收到策略变更通知", i)
+		}
+	}
+	if got := e.Version(); got != before+1 {
+		t.Fatalf("版本号应递增到 %d，实际 %d", before+1, got)
+	}
+
+	done1()
+	select {
+	case _, open := <-ch1:
+		if open {
+			t.Fatal("清理后的订阅通道应关闭")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("清理后的订阅通道未关闭")
+	}
+	// 已退订的客户端不应再收到事件，另一个客户端仍正常。
+	e.Invalidate()
+	select {
+	case change := <-ch2:
+		if change.Version != before+2 {
+			t.Fatalf("剩余订阅者收到版本 %d，期望 %d", change.Version, before+2)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("剩余订阅者未收到第二次变更")
 	}
 }
 

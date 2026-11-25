@@ -1,6 +1,8 @@
 /** 观看历史、进度与统计 API（v0.3.0，服务端按用户隔离）。 */
 import { request } from './client'
-import type { HeatView, HistoryEntryView, ProgressView, WatchSummary } from './types'
+import type {
+  HeatPage, HeatView, HistoryEntryView, ProgressView, UserHeatRow, WatchSummary,
+} from './types'
 
 export function listHistory(limit = 100) {
   return request<{ data: HistoryEntryView[] }>(`/history?limit=${limit}`)
@@ -64,23 +66,37 @@ export function getMyWatchSummary() {
 
 // ---------- 管理端 ----------
 
-export function getMediaHeat(limit = 100) {
-  return request<{ data: HeatView[] }>(`/admin/watch/heat/media?limit=${limit}`)
+export type HeatSortKey = 'heat' | 'play' | 'complete' | 'watched' | 'favorite' | 'name'
+export type HeatOrder = 'asc' | 'desc'
+
+export interface HeatQuery {
+  page: number
+  pageSize: number
+  sort: HeatSortKey
+  order: HeatOrder
 }
 
-export function getFolderHeat(limit = 100) {
-  return request<{ data: HeatView[] }>(`/admin/watch/heat/folders?limit=${limit}`)
+function heatQuery(q: HeatQuery) {
+  const params = new URLSearchParams({
+    page: String(q.page),
+    page_size: String(q.pageSize),
+    sort: q.sort,
+    order: q.order,
+  })
+  return params.toString()
 }
 
-export function getUserHeat(limit = 50) {
-  return request<{ data: Array<{
-    user_id: number
-    username: string
-    watched_videos: number
-    completed_videos: number
-    total_watch_time: number
-    last_played_at: string
-  }> }>(`/admin/watch/heat/users?limit=${limit}`)
+/** 热度统计：服务端全量排序后再分页，避免只排当前页。 */
+export function getMediaHeatPage(q: HeatQuery) {
+  return request<HeatPage<HeatView>>(`/admin/watch/heat/media?${heatQuery(q)}`)
+}
+
+export function getFolderHeatPage(q: HeatQuery) {
+  return request<HeatPage<HeatView>>(`/admin/watch/heat/folders?${heatQuery(q)}`)
+}
+
+export function getUserHeatPage(q: HeatQuery) {
+  return request<HeatPage<UserHeatRow>>(`/admin/watch/heat/users?${heatQuery(q)}`)
 }
 
 /** 推荐候选（预留接口，基于热度评分）。 */

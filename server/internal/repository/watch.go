@@ -269,9 +269,9 @@ type WatchProgressInput struct {
 
 // UserWatchSummary 用户观看汇总。
 type UserWatchSummary struct {
-	WatchedVideos  int     `json:"watched_videos"`
-	CompletedVideos int    `json:"completed_videos"`
-	TotalWatchTime float64 `json:"total_watch_time"`
+	WatchedVideos   int     `json:"watched_videos"`
+	CompletedVideos int     `json:"completed_videos"`
+	TotalWatchTime  float64 `json:"total_watch_time"`
 }
 
 // GetUserWatchSummary 汇总某用户的观看数据。
@@ -362,6 +362,51 @@ func (s *Store) DailyWatchSummary(ctx context.Context) (DailyWatchSummary, error
 		start.Format(time.RFC3339), end.Format(time.RFC3339)).
 		Scan(&v.WatchedVideos, &v.TotalWatchTime)
 	return v, err
+}
+
+// ListMediaPathSnapshots 返回观看历史/收藏里保留的媒体路径快照。
+// 媒体被扫描移除后 media_stats 仍保留统计行，可用这些快照补回可读文件名。
+// 观看历史按 id 递增覆盖，同一个 key 取最近一次记录；收藏只补空缺。
+func (s *Store) ListMediaPathSnapshots(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT video_key, rel_path FROM watch_history
+		 WHERE TRIM(COALESCE(rel_path, '')) <> '' ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var key, path string
+		if err := rows.Scan(&key, &path); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		out[key] = path
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	rows, err = s.db.QueryContext(ctx,
+		`SELECT video_key, video_path FROM favorites
+		 WHERE TRIM(COALESCE(video_path, '')) <> '' ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, path string
+		if err := rows.Scan(&key, &path); err != nil {
+			return nil, err
+		}
+		if _, ok := out[key]; !ok {
+			out[key] = path
+		}
+	}
+	return out, rows.Err()
 }
 
 // ListMediaStats 返回媒体统计（按热度倒序）。

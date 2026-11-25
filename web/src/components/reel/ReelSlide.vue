@@ -23,6 +23,15 @@ import {
 import { pauseOtherVideos, registerVideo, unregisterVideo } from '@/lib/playerRegistry'
 import type { MediaItem } from '@/api/types'
 
+/** 不可播放条目只允许「点一下 / 上下滑」跳过，不进入倍速、快进或音量手势。 */
+const BLOCKED_GESTURE: GestureConfig = {
+  singleTap: 'advance',
+  doubleTap: 'off',
+  vertical: 'switch',
+  horizontal: 'off',
+  longPressRate: false,
+}
+
 const props = defineProps<{
   item: MediaItem
   active: boolean
@@ -82,6 +91,8 @@ const imageProgress = ref(0)
 const imageLoaded = ref(false)
 /** 用户是否手动暂停：为 true 时自动播放逻辑不再抢占控制权 */
 const userPaused = ref(false)
+/** 策略禁用前是否由用户主动暂停，重新开放时不要擅自恢复播放。 */
+let userPausedBeforeBlock = false
 /** 浏览器自动播放策略导致的有声播放失败：临时静音，等用户手势后恢复 */
 const forcedMute = ref(false)
 /** 解除降级静音 / 手势结束后吞掉随后的 tap；用时间戳避免残留标记吞掉下一次正常点击。 */
@@ -227,13 +238,18 @@ function resetWatchObservation() {
 }
 
 const src = computed(() => withToken(props.item.stream_url))
+/** 只给当前项和相邻预载项设置 video src，避免整批视频抢占同源连接队列导致策略 SSE 迟迟连不上。 */
+const mediaSrc = computed(() => (props.active || props.preload ? src.value : ''))
 const thumb = computed(() => (props.item.thumb_url ? withToken(props.item.thumb_url) : ''))
 const blockedText = computed(() => reasonText(props.item.reason))
 const effectiveRate = computed(() => rateOverride.value ?? props.rate ?? 1)
 const canRender = computed(() => props.item.playable && !mediaError.value)
 const canInteract = computed(() => props.active && props.viewActive !== false && canRender.value)
-/** 当前生效的手势配置：全屏 > 沉浸 > 普通（v0.3.1）。 */
+/** 不可播放项仍允许手势滑走，但不能进入倍速/快进/音量。 */
+const canGesture = computed(() => props.active && props.viewActive !== false && (canRender.value || !props.item.playable))
+/** 当前生效的手势配置：不可播放 > 全屏 > 沉浸 > 普通（v0.3.1）。 */
 const gestureConfig = computed<GestureConfig>(() => {
+  if (!props.item.playable) return BLOCKED_GESTURE
   if (isFullscreen.value) return prefs.gestures.fullscreen
   if (props.immersive) return prefs.gestures.immersive
   return prefs.gestures.normal
@@ -629,10 +645,6 @@ function onVideoError() {
   emit('player-error', { key: props.item.key, message: mediaError.value })
 }
 
-function onBlockedClick() {
-  emit('blocked', props.item.reason ?? 'unknown')
-}
-
 /** 成为当前条目：按恢复进度或从头播放，图片启动停留计时。 */
 function activate() {
   if (!props.item.playable) return
@@ -664,6 +676,39 @@ function deactivate() {
 watch(
   () => props.active,
   (active) => (active ? activate() : deactivate()),
+)
+
+/** 策略实时同步：被禁用立即停播并退出全屏；重新开放时由本组件自动恢复。 */
+watch(
+  () => props.item.playable,
+  (playable) => {
+    if (!playable) {
+      userPausedBeforeBlock = userPaused.value
+      pause()
+      clearImageTimer()
+      endFullscreenIfOwned()
+      // 手势可能正停在按下/长按中间，禁用后必须清空状态，否则松手会误切视频。
+      clearPressTimer()
+      clearSingleTap()
+      pointerId = null
+      rateDragging.value = false
+      rateSelecting.value = false
+      swiping = false
+      resetGestureMode()
+      exitMinimal()
+      return
+    }
+    if (props.active && props.viewActive !== false) {
+      if (userPausedBeforeBlock) {
+        userPaused.value = true
+        playing.value = false
+        paused.value = true
+      } else {
+        activate()
+      }
+    }
+    userPausedBeforeBlock = false
+  },
 )
 
 /** 从后台 / bfcache 返回时恢复当前条目，避免黑屏有声或停在旧画面。 */
@@ -1020,7 +1065,7 @@ function resetGestureMode() {
 }
 
 function onGestureDown(event: PointerEvent) {
-  if (!canInteract.value) return
+  if (!canGesture.value) return
   if (event.button !== undefined && event.button !== 0) return
   pointerId = event.pointerId
   startX = lastX = event.clientX
@@ -1041,7 +1086,7 @@ function onGestureDown(event: PointerEvent) {
 }
 
 function onGestureMove(event: PointerEvent) {
-  if (pointerId !== event.pointerId || !canInteract.value) return
+  if (pointerId !== event.pointerId || !canGesture.value) return
   lastX = event.clientX
   lastY = event.clientY
   if (rateSelecting.value && rateDragging.value) {
@@ -1196,6 +1241,7 @@ watch(forcedMute, (v) => {
 defineExpose({
   togglePlay,
   resume,
+  pausePlayback: pause,
   seekBy,
   seekTo,
   replayFromStart,
@@ -1214,7 +1260,7 @@ defineExpose({
     :class="{ 'reel-css-fullscreen': cssFullscreen }"
   >
     <!-- 不可播放：模糊预览 + 原因说明（F-16） -->
-    <div v-if="!item.playable" class="reel-player-ui absolute inset-0">
+    <div v-if="!item.playable" class="reel-player-ui pointer-events-none absolute inset-0">
       <img
         v-if="thumb"
         :src="thumb"
@@ -1223,9 +1269,8 @@ defineExpose({
       />
       <div v-else class="h-full w-full bg-gradient-to-br from-slate-900 via-slate-800 to-black"></div>
       <div class="absolute inset-0 flex items-center justify-center px-8">
-        <button
-          class="flex max-w-sm flex-col items-center gap-3 rounded-2xl bg-black/45 px-8 py-7 text-center backdrop-blur-md transition hover:bg-black/55"
-          @click="onBlockedClick"
+        <div
+          class="flex max-w-sm flex-col items-center gap-3 rounded-2xl bg-black/45 px-8 py-7 text-center backdrop-blur-md"
         >
           <svg class="h-9 w-9 text-white/85" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
             <rect x="4" y="10.5" width="16" height="10" rx="2.5" />
@@ -1235,7 +1280,8 @@ defineExpose({
           <p class="text-xs leading-relaxed text-white/60">
             条目仍保留在你的收藏中，恢复可播放后可继续观看
           </p>
-        </button>
+          <p class="text-[11px] text-white/45">点击或上下滑动跳过</p>
+        </div>
       </div>
     </div>
 
@@ -1245,8 +1291,8 @@ defineExpose({
         v-if="!mediaError"
         ref="videoEl"
         class="h-full w-full object-contain"
-        :src="src"
-        :preload="preload ? 'auto' : 'metadata'"
+        :src="mediaSrc || undefined"
+        :preload="props.active ? 'auto' : 'metadata'"
         :muted="muted"
         :loop="endAction === 'loop'"
         playsinline
@@ -1316,7 +1362,7 @@ defineExpose({
 
     <!-- 手势层：触摸/鼠标上下拖动切换，长按进入倍速模式（控件在上层，不受影响） -->
     <div
-      v-if="active && item.playable"
+      v-if="active"
       class="absolute inset-0 z-[2] touch-none"
       @pointerdown="onGestureDown"
       @pointermove="onGestureMove"

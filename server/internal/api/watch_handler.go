@@ -96,35 +96,40 @@ func (h *Handlers) handleMyWatchSummary(c *gin.Context) {
 // ---------- 管理端统计与推荐 ----------
 
 // handleAdminMediaHeat GET /api/v1/admin/watch/heat/media
+// 全量排序后再分页：sort=heat|play|complete|watched|favorite|name，order=asc|desc。
 func (h *Handlers) handleAdminMediaHeat(c *gin.Context) {
-	limit := queryInt(c, "limit", 100)
-	list, err := h.watch.MediaHeat(c.Request.Context(), limit)
+	page := queryInt(c, "page", 1)
+	size := queryInt(c, "page_size", 10)
+	pageData, err := h.watch.MediaHeatPaged(c.Request.Context(), c.Query("sort"), queryDesc(c, true), page, size)
 	if err != nil {
 		failService(c, err)
 		return
 	}
-	ok(c, list)
+	paginated(c, pageData.Items, pageData.Total, page, size)
 }
 
 // handleAdminFolderHeat GET /api/v1/admin/watch/heat/folders
 func (h *Handlers) handleAdminFolderHeat(c *gin.Context) {
-	limit := queryInt(c, "limit", 100)
-	list, err := h.watch.FolderHeat(c.Request.Context(), limit)
+	page := queryInt(c, "page", 1)
+	size := queryInt(c, "page_size", 10)
+	pageData, err := h.watch.FolderHeatPaged(c.Request.Context(), c.Query("sort"), queryDesc(c, true), page, size)
 	if err != nil {
 		failService(c, err)
 		return
 	}
-	ok(c, list)
+	paginated(c, pageData.Items, pageData.Total, page, size)
 }
 
-// handleAdminUserHeat GET /api/v1/admin/watch/heat/users — 用户观看排行（配合 Console）。
+// handleAdminUserHeat GET /api/v1/admin/watch/heat/users — 用户观看排行。
 func (h *Handlers) handleAdminUserHeat(c *gin.Context) {
-	list, err := h.store.ListUserWatchRank(c.Request.Context(), queryInt(c, "limit", 50))
+	page := queryInt(c, "page", 1)
+	size := queryInt(c, "page_size", 10)
+	pageData, err := h.watch.UserHeatPaged(c.Request.Context(), c.Query("sort"), queryDesc(c, true), page, size)
 	if err != nil {
 		failService(c, err)
 		return
 	}
-	ok(c, list)
+	paginated(c, pageData.Items, pageData.Total, page, size)
 }
 
 // handleRecommend GET /api/v1/admin/recommend — 推荐候选（预留接口，基于热度评分）。

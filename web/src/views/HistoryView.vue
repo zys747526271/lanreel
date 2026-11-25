@@ -1,14 +1,16 @@
 <script setup lang="ts">
 /** 独立的观看历史页：服务端按用户隔离，与收藏夹同款网格，支持互切、移除与清空。 */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import MediaGrid from '@/components/media/MediaGrid.vue'
 import { useAuthStore } from '@/stores/auth'
 import { reasonText } from '@/lib/format'
 import { logger } from '@/lib/logger'
 import { clearHistory, listHistory, removeHistory } from '@/api/watch'
+import { fetchAllMediaStatus } from '@/api/media'
 import { removeCachedThumb } from '@/lib/thumbCache'
 import { rememberPlayerRoute } from '@/lib/session'
+import { subscribePolicyChanges } from '@/lib/policyEvents'
 import type { HistoryEntryView, MediaItem } from '@/api/types'
 
 const router = useRouter()
@@ -78,6 +80,28 @@ async function clearAll() {
   entries.value = []
 }
 
+let stopPolicyEvents: (() => void) | null = null
+let statusTimer: number | null = null
+let statusSyncing = false
+/** 策略变化后无需重新进入页面，直接刷新历史的模糊状态与原因。 */
+async function syncStatus() {
+  if (statusSyncing || !entries.value.length) return
+  statusSyncing = true
+  try {
+    const statuses = await fetchAllMediaStatus(entries.value.map((h) => h.key))
+    const map = new Map(statuses.map((s) => [s.key, s]))
+    entries.value = entries.value.map((h) => {
+      const s = map.get(h.key)
+      if (!s) return h
+      return { ...h, playable: s.playable, reason: s.playable ? undefined : s.reason }
+    })
+  } catch (err) {
+    logger.warn('app', 'policy', '刷新历史可播放状态失败', { error: err instanceof Error ? err.message : String(err) })
+  } finally {
+    statusSyncing = false
+  }
+}
+
 function goBack() {
   router.push('/')
 }
@@ -88,8 +112,17 @@ onMounted(async () => {
     return
   }
   await load()
+  stopPolicyEvents = subscribePolicyChanges(() => void syncStatus())
+  statusTimer = window.setInterval(() => void syncStatus(), 60000)
   const saved = Number(sessionStorage.getItem(SCROLL_KEY) ?? 0)
   if (saved) requestAnimationFrame(() => window.scrollTo({ top: saved }))
+})
+
+onBeforeUnmount(() => {
+  stopPolicyEvents?.()
+  stopPolicyEvents = null
+  if (statusTimer !== null) window.clearInterval(statusTimer)
+  statusTimer = null
 })
 </script>
 

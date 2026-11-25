@@ -2,6 +2,7 @@ import { request } from './client'
 import type {
   AdminStats,
   AuditLog,
+  DiagnosticReport,
   FileView,
   FolderPolicyView,
   LoggingSettings,
@@ -21,6 +22,11 @@ export function fetchStats() {
 
 export function triggerScan() {
   return request<{ data: { media_total: number } }>('/admin/scan', { method: 'POST' })
+}
+
+/** 真实只读诊断：数据库、媒体目录、扫描、策略、日志、前端资源与数据目录。 */
+export function fetchDiagnostics() {
+  return request<{ data: DiagnosticReport }>('/admin/diagnostics')
 }
 
 /** 恢复初始化：清空业务数据并回到首次部署状态。 */

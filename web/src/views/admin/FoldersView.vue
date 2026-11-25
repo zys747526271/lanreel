@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NButton,
   NCard,
@@ -19,6 +20,7 @@ import type { FolderPolicyView, ScheduleType } from '@/api/types'
 
 const message = useMessage()
 const dialog = useDialog()
+const route = useRoute()
 
 const folders = ref<FolderPolicyView[]>([])
 const loading = ref(true)
@@ -197,7 +199,28 @@ function sourceLabel(f: FolderPolicyView) {
   return { text: '默认允许', type: 'success' as const }
 }
 
-onMounted(load)
+const focusKey = computed(() => {
+  const root = Number(route.query.root)
+  const folderParam = route.query.folder
+  // 根目录的 folder 是空字符串，必须保留才能定位。
+  if (!Number.isFinite(root) || folderParam === undefined) return ''
+  return `${root}:${String(folderParam)}`
+})
+
+onMounted(async () => {
+  if (focusKey.value) {
+    // 目标可能在折叠的根下面：先展开再滚动定位。
+    const next = new Set(collapsed.value)
+    next.delete(`${Number(route.query.root)}:`)
+    collapsed.value = next
+  }
+  await load()
+  if (focusKey.value) {
+    requestAnimationFrame(() => {
+      document.querySelector('[data-folder-focus="true"]')?.scrollIntoView({ block: 'center' })
+    })
+  }
+})
 </script>
 
 <template>
@@ -236,7 +259,11 @@ onMounted(load)
               v-for="f in rows.filter((x) => x.root_index === -1 || !hiddenByRoot(root, x.folder_path))"
               :key="`${f.root_index}:${f.folder_path}`"
               class="hover:bg-slate-50/70"
-              :class="f.folder_path === '' ? 'bg-slate-50/40 font-medium' : ''"
+              :class="[
+                f.folder_path === '' ? 'bg-slate-50/40 font-medium' : '',
+                focusKey === `${f.root_index}:${f.folder_path}` ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-200' : '',
+              ]"
+              :data-folder-focus="focusKey === `${f.root_index}:${f.folder_path}` ? 'true' : undefined"
             >
               <td class="max-w-[340px] px-4 py-2.5">
                 <div class="flex flex-wrap items-center gap-1.5">

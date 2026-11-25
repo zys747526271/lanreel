@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NButton,
   NCard,
@@ -20,6 +21,7 @@ import type { FileView, FolderPolicyView, ScheduleType } from '@/api/types'
 
 const message = useMessage()
 const dialog = useDialog()
+const route = useRoute()
 
 const files = ref<FileView[]>([])
 const folders = ref<FolderPolicyView[]>([])
@@ -167,7 +169,16 @@ function guestStatus(f: FileView) {
 }
 
 onMounted(async () => {
+  // 从「观看热度与统计」跳转过来时，用 rel_path 精确定位到该视频。
+  const focus = typeof route.query.focus === 'string' ? route.query.focus.trim() : ''
+  if (focus) keyword.value = focus
   await Promise.all([load(), loadFolders()])
+  if (focus) {
+    requestAnimationFrame(() => {
+      const row = document.querySelector('[data-media-focus="true"]')
+      row?.scrollIntoView({ block: 'center' })
+    })
+  }
 })
 </script>
 
@@ -214,12 +225,19 @@ onMounted(async () => {
               <th class="px-4 py-2.5 text-left font-medium">大小 / 时长</th>
               <th class="px-4 py-2.5 text-left font-medium">普通用户</th>
               <th class="px-4 py-2.5 text-left font-medium">游客</th>
+              <th class="px-4 py-2.5 text-left font-medium">热度 / 播放 / 收藏</th>
               <th class="px-4 py-2.5 text-left font-medium">文件级策略</th>
               <th class="px-4 py-2.5 text-right font-medium">操作</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            <tr v-for="f in files" :key="f.key" class="hover:bg-slate-50/70">
+            <tr
+              v-for="f in files"
+              :key="f.key"
+              class="hover:bg-slate-50/70"
+              :class="keyword && f.rel_path === keyword ? 'bg-emerald-50/70' : ''"
+              :data-media-focus="keyword && f.rel_path === keyword ? 'true' : undefined"
+            >
               <td class="max-w-[320px] px-4 py-2.5">
                 <div class="flex items-center gap-1.5">
                   <n-tag size="tiny" :bordered="false">{{ f.root_name }}</n-tag>
@@ -236,6 +254,11 @@ onMounted(async () => {
               </td>
               <td class="px-4 py-2.5">
                 <n-tag size="small" :type="guestStatus(f).type" :bordered="false">{{ guestStatus(f).text }}</n-tag>
+              </td>
+              <td class="px-4 py-2.5 text-xs tabular-nums text-slate-600">
+                <span :title="`热度 ${f.heat_score.toFixed(1)} · 播放 ${f.play_count} 次 · 完播 ${f.completed_count} 次 · 观看 ${formatDuration(f.watched_seconds)} · 收藏 ${f.favorite_count} 次`">
+                  {{ f.heat_score.toFixed(1) }} 热 · {{ f.play_count }} 播 · {{ f.favorite_count }} 藏
+                </span>
               </td>
               <td class="px-4 py-2.5 text-xs text-slate-500">
                 <template v-if="f.override">
@@ -255,7 +278,7 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-if="!files.length && !loading">
-              <td colspan="7" class="px-4 py-10 text-center text-sm text-slate-400">没有匹配的文件</td>
+              <td colspan="8" class="px-4 py-10 text-center text-sm text-slate-400">没有匹配的文件</td>
             </tr>
           </tbody>
         </table>

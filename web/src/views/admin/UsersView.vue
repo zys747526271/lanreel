@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NButton,
   NCard,
@@ -27,6 +28,7 @@ import type { MediaItem, UserView } from '@/api/types'
 const message = useMessage()
 const dialog = useDialog()
 const auth = useAuthStore()
+const route = useRoute()
 
 const users = ref<UserView[]>([])
 const loading = ref(true)
@@ -168,7 +170,16 @@ async function cleanInvalid() {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  const focus = typeof route.query.focus === 'string' ? route.query.focus.trim() : ''
+  if (focus) keyword.value = focus
+  await load()
+  if (focus) {
+    requestAnimationFrame(() => {
+      document.querySelector('[data-user-focus="true"]')?.scrollIntoView({ block: 'center' })
+    })
+  }
+})
 </script>
 
 <template>
@@ -201,7 +212,13 @@ onMounted(load)
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            <tr v-for="u in users" :key="u.id" class="hover:bg-slate-50/70">
+            <tr
+              v-for="u in users"
+              :key="u.id"
+              class="hover:bg-slate-50/70"
+              :class="keyword && u.username === keyword ? 'bg-emerald-50/80' : ''"
+              :data-user-focus="keyword && u.username === keyword ? 'true' : undefined"
+            >
               <td class="px-4 py-2.5">
                 <p class="font-medium text-slate-800">
                   {{ u.username }}

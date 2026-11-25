@@ -98,6 +98,24 @@ func (s *MediaService) Decide(ctx context.Context, u *models.User, item *media.I
 	return s.evaluator.Evaluate(ctx, item, policy.ForUser(u), time.Now())
 }
 
+// PolicyVersion 返回当前策略版本，供 SSE 首帧与版本查询接口使用。
+func (s *MediaService) PolicyVersion() uint64 {
+	if s.evaluator == nil {
+		return 0
+	}
+	return s.evaluator.Version()
+}
+
+// SubscribePolicy 订阅策略变更；事件只带版本号，客户端收到后自行重新判定媒体状态。
+func (s *MediaService) SubscribePolicy() (<-chan policy.Change, func()) {
+	if s.evaluator == nil {
+		ch := make(chan policy.Change)
+		close(ch)
+		return ch, func() {}
+	}
+	return s.evaluator.Subscribe()
+}
+
 // RandomQuery 随机流查询参数。
 type RandomQuery struct {
 	Limit     int

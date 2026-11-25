@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -30,6 +31,9 @@ func created(c *gin.Context, data any) {
 func paginated(c *gin.Context, items any, total, page, size int) {
 	if page <= 0 {
 		page = 1
+	}
+	if size <= 0 {
+		size = 20
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"data": items,
@@ -85,6 +89,17 @@ func queryInt(c *gin.Context, key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func queryDesc(c *gin.Context, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(c.Query("order")))
+	if v == "asc" {
+		return false
+	}
+	if v == "desc" {
+		return true
+	}
+	return def
 }
 
 func queryInt64Ptr(c *gin.Context, key string) *int64 {

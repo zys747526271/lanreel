@@ -29,6 +29,13 @@ type Decision struct {
 	Reason   string
 }
 
+// Change 策略版本变更通知。客户端只关心版本号，收到后重新批量判定媒体状态，
+// 通知本身不携带任何用户或媒体隐私信息。
+type Change struct {
+	Version   uint64    `json:"version"`
+	ChangedAt time.Time `json:"changed_at"`
+}
+
 // Viewer 判定身份（管理员 / 普通用户 / 游客）。
 type Viewer struct {
 	IsAdmin bool
@@ -60,6 +67,9 @@ type Evaluator struct {
 	files    map[string]models.FileOverride
 	loadedAt time.Time
 	cacheTTL time.Duration
+
+	version     uint64
+	subscribers map[chan Change]struct{}
 }
 
 // NewEvaluator 构造判定器。
@@ -67,40 +77,103 @@ func NewEvaluator(src Source, loc *time.Location, logger *logging.Logger) *Evalu
 	if loc == nil {
 		loc = time.Local
 	}
-	return &Evaluator{src: src, loc: loc, log: logger, cacheTTL: 5 * time.Second}
+	return &Evaluator{
+		src: src, loc: loc, log: logger, cacheTTL: 5 * time.Second,
+		version: 1, subscribers: make(map[chan Change]struct{}),
+	}
 }
 
-// Invalidate 策略变更后使缓存失效（N-10）。
+// Version 返回当前策略版本。新客户端连接时先读取此版本，避免错过连接前的变更。
+func (e *Evaluator) Version() uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.version
+}
+
+// Subscribe 订阅策略变更。通道缓冲为 1，慢客户端只保留最新版本号，不会阻塞后台保存。
+// 调用方必须在退出时执行 cleanup，否则会泄漏订阅通道。
+func (e *Evaluator) Subscribe() (<-chan Change, func()) {
+	ch := make(chan Change, 1)
+	e.mu.Lock()
+	if e.subscribers == nil {
+		e.subscribers = make(map[chan Change]struct{})
+	}
+	e.subscribers[ch] = struct{}{}
+	e.mu.Unlock()
+
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			e.mu.Lock()
+			if _, ok := e.subscribers[ch]; ok {
+				delete(e.subscribers, ch)
+				close(ch)
+			}
+			e.mu.Unlock()
+		})
+	}
+	return ch, cleanup
+}
+
+// Invalidate 策略变更后使缓存失效并广播新版本（N-10 / v0.3.1 实时同步）。
 func (e *Evaluator) Invalidate() {
 	e.mu.Lock()
 	e.loadedAt = time.Time{}
+	e.version++
+	change := Change{Version: e.version, ChangedAt: time.Now()}
+	for ch := range e.subscribers {
+		select {
+		case ch <- change:
+		default:
+			// 客户端卡顿时丢弃中间版本；版本单调递增，重连后可按最新值恢复。
+		}
+	}
 	e.mu.Unlock()
 }
 
 func (e *Evaluator) load(ctx context.Context) {
-	e.mu.RLock()
-	fresh := time.Since(e.loadedAt) < e.cacheTTL && e.loadedAt != (time.Time{})
-	e.mu.RUnlock()
-	if fresh {
-		return
-	}
-	folders := map[folderKey]models.FolderPolicy{}
-	files := map[string]models.FileOverride{}
-	if e.src != nil {
-		if list, err := e.src.ListFolderPolicies(ctx); err == nil {
-			for _, p := range list {
-				folders[folderKey{Root: p.RootIndex, Path: media.NormalizeFolderPath(p.FolderPath)}] = p
+	attempts := 0
+	for {
+		e.mu.RLock()
+		fresh := time.Since(e.loadedAt) < e.cacheTTL && e.loadedAt != (time.Time{})
+		generation := e.version
+		e.mu.RUnlock()
+		if fresh {
+			return
+		}
+
+		folders := map[folderKey]models.FolderPolicy{}
+		files := map[string]models.FileOverride{}
+		if e.src != nil {
+			if list, err := e.src.ListFolderPolicies(ctx); err == nil {
+				for _, p := range list {
+					folders[folderKey{Root: p.RootIndex, Path: media.NormalizeFolderPath(p.FolderPath)}] = p
+				}
+			}
+			if m, err := e.src.ListFileOverrides(ctx); err == nil {
+				files = m
 			}
 		}
-		if m, err := e.src.ListFileOverrides(ctx); err == nil {
-			files = m
+
+		e.mu.Lock()
+		if generation != e.version && attempts < 3 {
+			// 读取期间策略被改动：丢弃旧结果并重新读，避免把过期策略写回缓存。
+			e.mu.Unlock()
+			attempts++
+			continue
 		}
+		// 极端高频写入时避免调用方活锁：接受本次结果，但不标记缓存新鲜。
+		forceReload := generation != e.version
+		e.folders = folders
+		e.files = files
+		if forceReload {
+			e.loadedAt = time.Time{}
+		} else {
+			e.loadedAt = time.Now()
+		}
+		e.mu.Unlock()
+		return
 	}
-	e.mu.Lock()
-	e.folders = folders
-	e.files = files
-	e.loadedAt = time.Now()
-	e.mu.Unlock()
 }
 
 // Evaluate 判定某媒体对某身份是否可播放。
