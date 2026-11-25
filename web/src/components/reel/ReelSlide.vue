@@ -13,7 +13,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { withToken } from '@/api/client'
 import { logger } from '@/lib/logger'
 import { reasonText, formatDuration } from '@/lib/format'
-import { RATE_OPTIONS, type PlaybackRate, type EndAction } from '@/lib/prefs'
+import {
+  RATE_OPTIONS,
+  prefs,
+  type GestureConfig,
+  type PlaybackRate,
+  type EndAction,
+} from '@/lib/prefs'
 import { pauseOtherVideos, registerVideo, unregisterVideo } from '@/lib/playerRegistry'
 import type { MediaItem } from '@/api/types'
 
@@ -37,6 +43,8 @@ const props = defineProps<{
   volume?: number
   /** 首页第一条允许下拉刷新随机流 */
   allowRefresh?: boolean
+  /** 页面是否处于前台（KeepAlive 切走后为 false，防止后台自动播放） */
+  viewActive?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -76,8 +84,11 @@ const imageLoaded = ref(false)
 const userPaused = ref(false)
 /** 浏览器自动播放策略导致的有声播放失败：临时静音，等用户手势后恢复 */
 const forcedMute = ref(false)
-/** 解除降级静音的那一次点击不再触发暂停（否则用户点一下会同时静音恢复+暂停） */
-let suppressNextClick = false
+/** 解除降级静音 / 手势结束后吞掉随后的 tap；用时间戳避免残留标记吞掉下一次正常点击。 */
+let suppressTapUntil = 0
+function suppressTap(ms = 400) {
+  suppressTapUntil = Math.max(suppressTapUntil, performance.now() + ms)
+}
 /** 进度条拖动状态（只有按下才跳转，见 F-04 修复） */
 const seeking = ref(false)
 const seekRatio = ref(0)
@@ -184,16 +195,19 @@ let rateStartY = 0
 let rateStartIndex = 0
 
 /**
- * 手势方向锁（参考 ZFPlayer / TigerVideoPlayer）：
- * - 全屏 / 沉浸：横向拖动快进，全屏纵向拖动调音量；
- * - 普通模式：纵向拖动切视频，首页第一条下拉刷新。
- * 三种模式互斥，避免全屏切换视频导致黑屏串音。
+ * 手势方向锁（参考 ZFPlayer / TigerVideoPlayer）：按用户配置决定横/纵滑行为。
+ * 全屏配置优先级最高，其次是沉浸，最后普通；同一时刻只锁定一个方向，
+ * 避免切视频与快进/音量互相抢占。
  */
-type GestureMode = 'none' | 'seek' | 'volume'
+type GestureMode = 'none' | 'seek' | 'volume' | 'volumeX'
 let gestureMode: GestureMode = 'none'
+let gestureStartX = 0
 let gestureStartY = 0
 let gestureStartCurrent = 0
 let gestureStartVolume = 1
+/** 单击延时窗口：等待可能的双击；双击配置为关闭时立即执行单击。 */
+let singleTapTimer: number | null = null
+let lastTapAt = 0
 const gestureHud = ref('')
 let gestureHudTimer: number | null = null
 
@@ -217,25 +231,39 @@ const thumb = computed(() => (props.item.thumb_url ? withToken(props.item.thumb_
 const blockedText = computed(() => reasonText(props.item.reason))
 const effectiveRate = computed(() => rateOverride.value ?? props.rate ?? 1)
 const canRender = computed(() => props.item.playable && !mediaError.value)
-const canInteract = computed(() => props.active && canRender.value)
+const canInteract = computed(() => props.active && props.viewActive !== false && canRender.value)
+/** 当前生效的手势配置：全屏 > 沉浸 > 普通（v0.3.1）。 */
+const gestureConfig = computed<GestureConfig>(() => {
+  if (isFullscreen.value) return prefs.gestures.fullscreen
+  if (props.immersive) return prefs.gestures.immersive
+  return prefs.gestures.normal
+})
 const rateHint = computed(() => `${effectiveRate.value}×`)
 
+let lastProgressSignature = ''
+let lastProgressAt = 0
 function emitProgress(force = false, justStarted = false) {
   const el = videoEl.value
   if (!el || props.item.media_type !== 'video') return
   const now = performance.now()
   if (!force && now - lastProgressEmit < 1000) return
   lastProgressEmit = now
-  const watchedDelta = pendingWatched
+  const watchedDelta = Number(pendingWatched.toFixed(2))
   pendingWatched = 0
-  emit('progress', {
+  const payload = {
     key: props.item.key,
     current: Number(el.currentTime.toFixed(2)),
     duration: Number((Number.isFinite(el.duration) ? el.duration : duration.value).toFixed(2)),
     started: hasStarted,
     justStarted,
-    watchedDelta: Number(watchedDelta.toFixed(2)),
-  })
+    watchedDelta,
+  }
+  // 同一时刻的多条路径（pause/ended/canplay）可能重复上报，去掉完全相同的近邻事件。
+  const signature = JSON.stringify(payload)
+  if (signature === lastProgressSignature && now - lastProgressAt < 80) return
+  lastProgressSignature = signature
+  lastProgressAt = now
+  emit('progress', payload)
 }
 
 function clearImageTimer() {
@@ -268,63 +296,69 @@ function startImageTimer() {
   imageTimer = window.setTimeout(() => emit('advance'), total)
 }
 
+let playPending = false
 async function tryPlay() {
   const el = videoEl.value
-  if (!el || !props.active) return
-  // 会话恢复 / 快速切换时，避免首条与恢复条目同时出声。
-  pauseOtherVideos(el)
-  // ended 状态下再次 play 浏览器虽会自动回到开头，但原生全屏常先显示黑帧；
-  // 这里主动归零并清掉结束态，让画面立刻恢复第一帧。
-  if (videoEnded.value || el.ended) {
-    videoEnded.value = false
-    el.currentTime = 0
-    current.value = 0
-    resetWatchObservation()
-  }
-  el.muted = props.muted || forcedMute.value
+  if (!el || !props.active || props.viewActive === false || document.hidden || playPending) return
+  playPending = true
   try {
-    await el.play()
-    // play() 是异步的：等待期间可能已经切走，此时必须立刻让位。
-    if (!props.active || userPaused.value) {
-      el.pause()
-      playing.value = false
-      paused.value = true
-      return
-    }
+    // 会话恢复 / 快速切换时，避免首条与恢复条目同时出声。
     pauseOtherVideos(el)
-    playing.value = true
-    paused.value = false
-  } catch {
-    if (!props.active || userPaused.value) {
-      playing.value = false
-      paused.value = true
-      return
+    // ended 状态下再次 play 浏览器虽会自动回到开头，但原生全屏常先显示黑帧；
+    // 这里主动归零并清掉结束态，让画面立刻恢复第一帧。
+    if (videoEnded.value || el.ended) {
+      videoEnded.value = false
+      el.currentTime = 0
+      current.value = 0
+      resetWatchObservation()
     }
-    // 有声自动播放被浏览器拦截：降级为静音重试，并提示用户点击恢复声音。
-    if (!el.muted) {
-      forcedMute.value = true
-      el.muted = true
-      emit('autoplay-muted')
-      try {
-        await el.play()
-        if (!props.active || userPaused.value) {
-          el.pause()
-          playing.value = false
-          paused.value = true
-          return
-        }
-        pauseOtherVideos(el)
-        playing.value = true
-        paused.value = false
-        return
-      } catch {
+    el.muted = props.muted || forcedMute.value
+    try {
+      await el.play()
+      // play() 是异步的：等待期间可能已经切走，此时必须立刻让位。
+      if (!props.active || userPaused.value) {
+        el.pause()
         playing.value = false
         paused.value = true
         return
       }
+      pauseOtherVideos(el)
+      playing.value = true
+      paused.value = false
+    } catch {
+      if (!props.active || userPaused.value) {
+        playing.value = false
+        paused.value = true
+        return
+      }
+      // 有声自动播放被浏览器拦截：降级为静音重试，并提示用户点击恢复声音。
+      if (!el.muted) {
+        forcedMute.value = true
+        el.muted = true
+        emit('autoplay-muted')
+        try {
+          await el.play()
+          if (!props.active || userPaused.value) {
+            el.pause()
+            playing.value = false
+            paused.value = true
+            return
+          }
+          pauseOtherVideos(el)
+          playing.value = true
+          paused.value = false
+          return
+        } catch {
+          playing.value = false
+          paused.value = true
+          return
+        }
+      }
+      playing.value = false
+      paused.value = true
     }
-    playing.value = false
-    paused.value = true
+  } finally {
+    playPending = false
   }
 }
 
@@ -332,11 +366,11 @@ async function tryPlay() {
 function onFirstGesture() {
   if (!forcedMute.value) return
   forcedMute.value = false
-  suppressNextClick = true
+  suppressTap()
   const el = videoEl.value
   if (!el) return
   el.muted = props.muted
-  if (props.active && !userPaused.value) {
+  if (props.active && props.viewActive !== false && !userPaused.value) {
     void el.play().catch(() => {
       playing.value = false
       paused.value = true
@@ -439,7 +473,7 @@ function isPaused() {
 function onCanPlay() {
   // 结束态回退到最后一帧时浏览器可能再派发 canplay；此时不能自动重播，
   // 否则全屏下会先闪黑再从头播放，看起来像「播完黑屏」。
-  if (props.active && !userPaused.value && !mediaError.value && !videoEnded.value) void tryPlay()
+  if (props.viewActive !== false && props.active && !userPaused.value && !mediaError.value && !videoEnded.value) void tryPlay()
   else if (!props.active && !videoEl.value?.paused) videoEl.value?.pause()
 }
 
@@ -476,7 +510,7 @@ function onTimeUpdate() {
   if (!el || seeking.value) return
   const nowTs = performance.now()
   // 只累计自然播放推进：跳播后 lastObservedTime 被清空，这一帧不计入。
-  if (!el.paused && props.active && lastObservedTime !== null) {
+  if (!el.paused && canInteract.value && lastObservedTime !== null) {
     const advanced = el.currentTime - lastObservedTime
     const wall = Math.max(0.01, (nowTs - lastTickAt) / 1000)
     const maxNatural = Math.max(0.75, wall * effectiveRate.value * 1.6)
@@ -556,6 +590,7 @@ function onLoadedMetadata() {
  */
 function onVideoEnded() {
   videoEnded.value = true
+  if (videoEl.value) current.value = videoEl.value.currentTime
   playing.value = false
   paused.value = true
   hideInteractionHud()
@@ -602,6 +637,8 @@ function onBlockedClick() {
 function activate() {
   if (!props.item.playable) return
   userPaused.value = false
+  clearSingleTap()
+  lastTapAt = 0
   if (props.item.media_type === 'video') {
     const el = videoEl.value
     if (!el) return
@@ -618,6 +655,7 @@ function activate() {
 function deactivate() {
   emitProgress(true)
   pause()
+  clearSingleTap()
   clearImageTimer()
   exitMinimal()
   endFullscreenIfOwned()
@@ -630,7 +668,7 @@ watch(
 
 /** 从后台 / bfcache 返回时恢复当前条目，避免黑屏有声或停在旧画面。 */
 function onVisibilityChange() {
-  if (!props.active) return
+  if (!props.active || props.viewActive === false) return
   if (document.visibilityState === 'visible') {
     const el = videoEl.value
     // 已停在其他标签页期间结束的视频不要自动重播，保留封面 + 重播提示即可。
@@ -644,10 +682,12 @@ function onVisibilityChange() {
 // 首屏首个条目在组件挂载时即为 active，需要在 DOM 就绪后触发播放。
 onMounted(() => {
   document.addEventListener('fullscreenchange', onFullscreenChange)
-  document.addEventListener('webkitendfullscreen', onWebkitEndFullscreen)
+  document.addEventListener('webkitbeginfullscreen', onWebkitFullscreenChange)
+  document.addEventListener('webkitendfullscreen', onWebkitFullscreenChange)
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('orientationchange', onOrientationChange)
-  if (props.active) activate()
+  if (forcedMute.value) rootEl.value?.addEventListener('pointerdown', onFirstGesture, { passive: true })
+  if (props.active && props.viewActive !== false) activate()
 })
 
 // <video> 元素在 v-if 渲染完成后才可用，元素出现时补一次播放尝试。
@@ -659,7 +699,7 @@ watch(videoEl, (el, oldEl) => {
     el.volume = Math.max(0, Math.min(1, props.volume ?? 1))
     el.playbackRate = effectiveRate.value
     applyResume()
-    if (props.active) void tryPlay()
+    if (props.active && props.viewActive !== false) void tryPlay()
     else if (!el.paused) el.pause()
   }
 })
@@ -729,13 +769,18 @@ watch(
 
 /* ------------------------------ 全屏 ------------------------------ */
 
-function onFullscreenChange() {
-  isFullscreen.value = cssFullscreen.value || document.fullscreenElement === rootEl.value
+function videoInNativeFullscreen() {
+  const el = videoEl.value as (HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }) | null
+  return el?.webkitDisplayingFullscreen === true
 }
 
-/** iOS <video> 私有全屏退出（不触发标准 fullscreenchange）也要同步状态。 */
-function onWebkitEndFullscreen() {
-  isFullscreen.value = cssFullscreen.value
+function onFullscreenChange() {
+  isFullscreen.value = cssFullscreen.value || document.fullscreenElement === rootEl.value || videoInNativeFullscreen()
+}
+
+/** iOS <video> 私有全屏进入/退出（不触发标准 fullscreenchange）也要同步状态。 */
+function onWebkitFullscreenChange() {
+  onFullscreenChange()
 }
 
 function orientationApi() {
@@ -761,6 +806,11 @@ function endFullscreenIfOwned() {
   if (rootEl.value && document.fullscreenElement === rootEl.value) {
     void document.exitFullscreen().catch(() => undefined)
   }
+  const nativeVideo = videoEl.value as (HTMLVideoElement & {
+    webkitDisplayingFullscreen?: boolean
+    webkitExitFullscreen?: () => void
+  }) | null
+  if (nativeVideo?.webkitDisplayingFullscreen) nativeVideo.webkitExitFullscreen?.()
   try {
     const orientation = orientationApi()
     if (orientation.unlock) void Promise.resolve(orientation.unlock()).catch(() => undefined)
@@ -775,36 +825,49 @@ function onOrientationChange() {
   window.dispatchEvent(new Event('resize'))
 }
 
+/** 以真实 DOM 状态判断全屏，避免缓存的 isFullscreen 与 Esc/外部清理不同步导致首次点击无效。 */
+function actuallyFullscreen() {
+  return (
+    document.documentElement.classList.contains('reel-css-fullscreen-host') ||
+    document.fullscreenElement === rootEl.value ||
+    videoInNativeFullscreen()
+  )
+}
+
 async function toggleFullscreen(rotate = false) {
+  // 关键：点击时先同步真实状态，不再依赖可能过期的 isFullscreen。
+  isFullscreen.value = actuallyFullscreen()
   if (isFullscreen.value) {
     endFullscreenIfOwned()
     return
   }
+  // 不要在 requestFullscreen 之前 await exitFullscreen：等待会消耗用户手势，
+  // 这正是「第一次点击无反应、要点两三次」的根因。
   if (isTouchDevice) {
-    // 手机端先尝试真正的原生全屏；iOS 等不支持时退回 CSS 铺满。
     try {
       await rootEl.value?.requestFullscreen?.()
       isFullscreen.value = true
-      if (rotate) await lockLandscape()
+      if (rotate) void lockLandscape()
       return
     } catch {
-      /* 原生全屏不可用，使用 CSS 全屏 */
+      /* 原生全屏不可用，使用 CSS 铺满 */
     }
     cssFullscreen.value = true
     document.documentElement.classList.add('reel-css-fullscreen-host')
     isFullscreen.value = true
-    if (rotate) await lockLandscape()
+    if (rotate) void lockLandscape()
     return
   }
-  if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined)
   try {
     await rootEl.value?.requestFullscreen?.()
-    if (rotate) await lockLandscape()
+    isFullscreen.value = true
   } catch {
     // iOS Safari 的 <video> 私有全屏作为回退（按视频比例显示）
     const el = videoEl.value as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null
     el?.webkitEnterFullscreen?.()
+    isFullscreen.value = !!el
   }
+  if (rotate) void lockLandscape()
 }
 
 /* --------------------------- 倍速 / 手势 --------------------------- */
@@ -826,6 +889,8 @@ function beginRateMode(adjustCurrent = false) {
   if (!props.active || !canRender.value) return
   longPressed = true
   swiping = false
+  // 场景配置关闭长按倍速时，长按只吞掉这次点击，不进入调速面板。
+  if (!gestureConfig.value.longPressRate) return
   rateSelecting.value = true
   rateDragging.value = true
   // 长按加速时立即隐藏其他 UI（极简模式由手势持有，松手才恢复）。
@@ -883,15 +948,71 @@ function previewSeek(target: number) {
   showInteractionHud(0)
 }
 
-/** 全屏竖滑调音量：整屏高度对应 0~1，松手后由父级保存。 */
-function applyVolumeDrag(clientY: number) {
+/** 滑动调音量：纵向按屏高、横向按屏宽映射 0~1，松手后由父级保存。 */
+function applyVolumeDrag(delta: number, span: number) {
   const el = videoEl.value
   if (!el) return
-  const height = Math.max(1, rootEl.value?.clientHeight || window.innerHeight)
-  const volume = Math.max(0, Math.min(1, gestureStartVolume + (gestureStartY - clientY) / height))
+  const volume = Math.max(0, Math.min(1, gestureStartVolume + delta / Math.max(1, span)))
   el.volume = volume
   emit('volume-change', { volume, muted: volume <= 0.001 })
   showGestureHud(`音量 ${Math.round(volume * 100)}%`)
+}
+
+function clearSingleTap() {
+  if (singleTapTimer !== null) {
+    window.clearTimeout(singleTapTimer)
+    singleTapTimer = null
+  }
+}
+
+function runSingleTap() {
+  switch (gestureConfig.value.singleTap) {
+    case 'advance':
+      emit('advance')
+      break
+    case 'immersive':
+      emit('toggle-immersive')
+      break
+    case 'pause':
+      togglePlay()
+      break
+    default:
+      break
+  }
+}
+
+function runDoubleTap() {
+  switch (gestureConfig.value.doubleTap) {
+    case 'favorite':
+      emit('toggle-favorite', props.item.key)
+      break
+    case 'pause':
+      togglePlay()
+      break
+    default:
+      break
+  }
+}
+
+/** 单击/双击分流：先等一个短暂窗口，窗口内第二次点击改执行双击动作。 */
+function handleTapEnd() {
+  const now = performance.now()
+  const isDouble = now - lastTapAt < 320
+  lastTapAt = now
+  if (singleTapTimer !== null && isDouble) {
+    clearSingleTap()
+    runDoubleTap()
+    return
+  }
+  clearSingleTap()
+  if (gestureConfig.value.doubleTap === 'off') {
+    runSingleTap()
+    return
+  }
+  singleTapTimer = window.setTimeout(() => {
+    singleTapTimer = null
+    runSingleTap()
+  }, 240)
 }
 
 function resetGestureMode() {
@@ -904,12 +1025,13 @@ function onGestureDown(event: PointerEvent) {
   pointerId = event.pointerId
   startX = lastX = event.clientX
   startY = lastY = event.clientY
+  gestureStartX = event.clientX
   gestureStartY = event.clientY
   gestureStartCurrent = videoEl.value?.currentTime ?? 0
   gestureStartVolume = props.volume ?? videoEl.value?.volume ?? 1
   gestureMode = 'none'
   clearPressTimer()
-  // 单击始终是暂停/播放；再次长按才进入调速（从当前倍速起调）。
+  // 长按由场景配置决定是否进入调速（从当前倍速起调）。
   longPressed = false
   swiping = false
   rateDragging.value = false
@@ -931,44 +1053,47 @@ function onGestureMove(event: PointerEvent) {
 
   const dx = event.clientX - startX
   const dy = event.clientY - startY
-  const gesturePlayer = isFullscreen.value || props.immersive === true
+  const cfg = gestureConfig.value
+  const width = Math.max(1, rootEl.value?.clientWidth || window.innerWidth)
+  const height = Math.max(1, rootEl.value?.clientHeight || window.innerHeight)
 
   if (gestureMode === 'seek') {
     event.preventDefault()
     const el = videoEl.value
     if (el && Number.isFinite(el.duration) && el.duration > 0) {
-      const scale = el.duration / Math.max(1, rootEl.value?.clientWidth || window.innerWidth)
-      previewSeek(gestureStartCurrent + dx * scale)
+      previewSeek(gestureStartCurrent + (dx / width) * el.duration)
     }
     return
   }
   if (gestureMode === 'volume') {
     event.preventDefault()
-    applyVolumeDrag(event.clientY)
+    applyVolumeDrag(gestureStartY - event.clientY, height)
+    return
+  }
+  if (gestureMode === 'volumeX') {
+    event.preventDefault()
+    applyVolumeDrag(event.clientX - gestureStartX, width)
     return
   }
   if (longPressed) return
 
-  if (gesturePlayer && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy)) {
-    // 方向锁定为横向：全屏/沉浸下拖动快进。
+  // 先按主轴锁定方向：横向优先判定配置，纵向再判定配置，二者不会同时抢手势。
+  if (cfg.horizontal !== 'off' && Math.abs(dx) > 12 && Math.abs(dx) >= Math.abs(dy)) {
     clearPressTimer()
-    gestureMode = 'seek'
+    gestureMode = cfg.horizontal === 'seek' ? 'seek' : 'volumeX'
     swiping = false
     event.preventDefault()
     return
   }
-  if (isFullscreen.value && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) {
-    // 方向锁定为纵向：全屏下调节音量，绝不切换视频。
+  if (cfg.vertical === 'volume' && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) {
     clearPressTimer()
     gestureMode = 'volume'
     swiping = false
     event.preventDefault()
-    applyVolumeDrag(event.clientY)
+    applyVolumeDrag(gestureStartY - event.clientY, height)
     return
   }
-  if (!isFullscreen.value && Math.abs(dy) > 14) {
-    // 普通模式与非全屏沉浸保留纵向切换；首页第一条下拉刷新。
-    // 全屏已由上面的音量手势接管，不会误切视频。
+  if (cfg.vertical === 'switch' && Math.abs(dy) > 14 && Math.abs(dy) >= Math.abs(dx)) {
     clearPressTimer()
     swiping = true
   }
@@ -988,26 +1113,26 @@ function onGestureUp(event: PointerEvent) {
   if (finishedMode === 'seek') {
     emitProgress(true)
     showInteractionHud(900)
-    suppressNextClick = true
+    suppressTap()
     return
   }
-  if (finishedMode === 'volume') {
-    suppressNextClick = true
+  if (finishedMode === 'volume' || finishedMode === 'volumeX') {
+    suppressTap()
     return
   }
   if (inRateSelection) {
     // Kazumi：松手即保持所选倍速，中央面板收起并立即恢复完整 UI。
     exitMinimal()
     showInteractionHud(900)
-    suppressNextClick = true
+    suppressTap()
     return
   }
   if (swiping) {
     const dy = event.clientY - startY
-    suppressNextClick = true
+    suppressTap()
     if (dy > 40) {
       // 首页第一条下拉刷新（抖音式）；全屏竖滑已被音量占用，不会误触发。
-      if (props.allowRefresh && !isFullscreen.value) emit('refresh')
+      if (props.allowRefresh && !isFullscreen.value && !props.immersive) emit('refresh')
       else emit('retreat')
     } else if (dy < -40) {
       emit('advance')
@@ -1015,16 +1140,19 @@ function onGestureUp(event: PointerEvent) {
     return
   }
   if (event.type === 'pointercancel') return
-  // 解除降级静音的那次点击不能同时暂停/播放
-  if (suppressNextClick) {
-    suppressNextClick = false
+  if (longPressed) {
+    // 长按关闭倍速时也吞掉这次点击，避免长时间按住松手后误暂停。
+    suppressTap()
     return
   }
-  togglePlay()
+  // 解除降级静音的那次点击不能同时暂停/播放
+  if (performance.now() < suppressTapUntil) return
+  handleTapEnd()
 }
 
 function onGestureCancel(event: PointerEvent) {
   clearPressTimer()
+  clearSingleTap()
   if (pointerId !== event.pointerId) return
   pointerId = null
   rateDragging.value = false
@@ -1048,9 +1176,11 @@ onBeforeUnmount(() => {
   pause()
   unregisterVideo(videoEl.value)
   clearPressTimer()
-  document.removeEventListener('pointerdown', onFirstGesture)
+  clearSingleTap()
+  rootEl.value?.removeEventListener('pointerdown', onFirstGesture)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
-  document.removeEventListener('webkitendfullscreen', onWebkitEndFullscreen)
+  document.removeEventListener('webkitbeginfullscreen', onWebkitFullscreenChange)
+  document.removeEventListener('webkitendfullscreen', onWebkitFullscreenChange)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('orientationchange', onOrientationChange)
   endFullscreenIfOwned()
@@ -1058,8 +1188,9 @@ onBeforeUnmount(() => {
 
 // 降级静音后，任意点击/触摸都可恢复声音（浏览器要求在手势回调中调用 play）。
 watch(forcedMute, (v) => {
-  if (v) document.addEventListener('pointerdown', onFirstGesture, { passive: true })
-  else document.removeEventListener('pointerdown', onFirstGesture)
+  // 只监听当前播放器根节点，避免其它 KeepAlive 页面响应导致串音。
+  if (v) rootEl.value?.addEventListener('pointerdown', onFirstGesture, { passive: true })
+  else rootEl.value?.removeEventListener('pointerdown', onFirstGesture)
 })
 
 defineExpose({
@@ -1072,6 +1203,7 @@ defineExpose({
   isPaused,
   getRate: () => effectiveRate.value,
   toggleFullscreen,
+  exitFullscreenOwned: endFullscreenIfOwned,
 })
 </script>
 
@@ -1209,7 +1341,7 @@ defineExpose({
     <!-- 倍速选择面板：按住期间居中半透明显示，松手即收起但倍速保持（参考 Kazumi） -->
     <div
       v-if="active && rateSelecting"
-      class="reel-player-ui pointer-events-none absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/25 bg-black/45 px-7 py-5 text-center text-white shadow-xl backdrop-blur-md"
+      class="pointer-events-none absolute left-1/2 top-1/2 z-[62] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/25 bg-black/45 px-7 py-5 text-center text-white shadow-xl backdrop-blur-md"
     >
       <div class="text-3xl font-semibold tracking-wide">{{ rateHint }}</div>
       <div class="mt-1.5 text-[11px] text-white/70">上下滑动调速 · 松开保持</div>

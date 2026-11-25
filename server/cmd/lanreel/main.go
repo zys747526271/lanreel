@@ -31,7 +31,7 @@ import (
 )
 
 // version 由构建脚本通过 -ldflags 注入。
-var version = "0.3.0"
+var version = "0.3.1"
 
 func main() {
 	var (

@@ -11,7 +11,7 @@
 
 GO ?= go
 NPM ?= npm
-VERSION ?= 0.3.0
+VERSION ?= 0.3.1
 BIN_DIR := dist
 WEB_DIR := web
 EMBED_DIR := server/internal/webui/dist

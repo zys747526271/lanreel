@@ -7,10 +7,7 @@ import { logger, type LogRecord } from '@/lib/logger'
 import { countAll, clearStore } from '@/lib/db'
 import { fetchPublicConfig, withToken } from '@/api/client'
 import { formatTime, formatDuration } from '@/lib/format'
-import {
-  RATE_OPTIONS, END_ACTION_OPTIONS, prefs, resetPrefs,
-  type PlaybackRate, type EndAction,
-} from '@/lib/prefs'
+import { RATE_OPTIONS, prefs, resetPrefs, type PlaybackRate } from '@/lib/prefs'
 import type { PublicConfig, WatchSummary } from '@/api/types'
 import { playerReturnPath } from '@/lib/session'
 import { getMyWatchSummary } from '@/api/watch'
@@ -131,10 +128,6 @@ function setRate(value: PlaybackRate) {
   prefs.defaultRate = value
 }
 
-function setEndAction(value: EndAction) {
-  prefs.endAction = value
-}
-
 function resetPreferences() {
   resetPrefs()
   hint.value = '播放设置已恢复默认'
@@ -221,6 +214,20 @@ onMounted(async () => {
         </div>
 
         <div class="space-y-4 text-sm">
+          <!-- v0.3.1：手势与结束行为归入二级页面 -->
+          <router-link
+            to="/settings/gestures"
+            class="flex items-center justify-between gap-3 rounded-xl border border-white/12 bg-white/[0.04] px-3 py-2.5 transition hover:bg-white/[0.08]"
+          >
+            <div>
+              <p>手势与播放操作</p>
+              <p class="mt-0.5 text-xs text-white/40">
+                普通 / 沉浸 / 全屏分别设置单击、双击、滑动、长按倍速与播放结束行为
+              </p>
+            </div>
+            <span class="text-white/35">›</span>
+          </router-link>
+
           <div class="flex items-center justify-between gap-4">
             <div>
               <p>默认静音</p>
@@ -289,30 +296,6 @@ onMounted(async () => {
                 :class="prefs.autoRotate ? 'left-[1.375rem]' : 'left-0.5 bg-white/70'"
               ></span>
             </button>
-          </div>
-
-          <!-- 需求 3：播放结束行为 -->
-          <div>
-            <p class="mb-2">播放结束后</p>
-            <div class="grid grid-cols-3 gap-1.5">
-              <button
-                v-for="opt in END_ACTION_OPTIONS"
-                :key="opt.value"
-                class="rounded-lg border px-2 py-2 text-center text-xs transition"
-                :class="
-                  prefs.endAction === opt.value
-                    ? 'border-white bg-white text-black'
-                    : 'border-white/15 text-white/70 hover:bg-white/10'
-                "
-                :title="opt.desc"
-                @click="setEndAction(opt.value)"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-            <p class="mt-1.5 text-[11px] text-white/35">
-              {{ END_ACTION_OPTIONS.find((o) => o.value === prefs.endAction)?.desc }}
-            </p>
           </div>
 
           <!-- 需求 2：随机刷到看过视频的策略 -->

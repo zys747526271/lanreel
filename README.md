@@ -2,9 +2,9 @@
 
 局域网随机视频流媒体系统：部署在 Windows / Linux（含 NAS）主机上，用浏览器以抖音式竖屏滑动方式浏览指定文件夹里的视频与图片，支持注册登录、跨设备收藏同步与管理员后台。
 
-**当前版本：v0.3.0（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
+**当前版本：v0.3.1（可运行）** — 前后端已完成并在浏览器实测通过。Go 单二进制内嵌前端，启动即用。
 
-下载：见 [Releases](https://github.com/zys747526271/lanreel/releases)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.3.0.md](./docs/releases/v0.3.0.md)。
+下载：见 [Releases](https://github.com/zys747526271/lanreel/releases)（Windows x64 单文件，解压即用）；发布说明见 [docs/releases/v0.3.1.md](./docs/releases/v0.3.1.md)。
 
 <p>
   <img src="./docs/screenshots/setup-admin.png" width="240" alt="首次部署：创建管理员" />
@@ -261,7 +261,7 @@ cd web && npx vue-tsc --noEmit
 - 管理员接口额外校验 `role=admin`，越权与写操作均留痕
 - 局域网自签 HTTPS 即可；若要暴露公网，请走反向代理 + Let's Encrypt，不要直接开放端口
 
-## 验证情况（v0.3.0）
+## 验证情况（v0.3.1）
 
 - `go vet ./...` 无告警；`go test ./...`（media / policy / config）全部通过
 - 用 3 个样本媒体（1 视频 2 图片）实测：注册登录、随机流、视频自动播放、图片 5 秒切换、
@@ -271,6 +271,7 @@ cd web && npx vue-tsc --noEmit
 - v0.2.0 交互实测：设置页往返进度恢复、全屏比例、空格暂停、长按方向键快进、鼠标拖动切视频、长按倍速与点击退出、悬停抽帧封面、收藏/历史互切
 - v0.2.1 修复实测：历史无权限条目高强度高斯模糊 + 居中原因提示；长按默认 1.5×，上滑变 2×，松手面板消失但保持 2×，点击底部提示回 1×
 - v0.3.0 实测：历史按账号隔离（user1 有记录 / owner 为空）、每用户进度云端同步与续播、从头开始清零、播放次数准确（=1）、文件夹热度实时聚合、极简快进 UI 与时间 HUD、三档热度排行与推荐接口、播放时段用户/游客独立
+- v0.3.1 实测：三场景手势配置页保存后即时生效；双击点赞与单击暂停分流正确；全屏首次点击即进入；收藏清理按钮仅在批量管理中出现
 - 空闲内存 28MB（低于 N-01 的 50MB 目标）
 
 ## 文档
@@ -284,6 +285,7 @@ cd web && npx vue-tsc --noEmit
 | [docs/releases/v0.2.0.md](./docs/releases/v0.2.0.md) | v0.2.0 发布说明 |
 | [docs/releases/v0.2.1.md](./docs/releases/v0.2.1.md) | v0.2.1 发布说明（修复版） |
 | [docs/releases/v0.3.0.md](./docs/releases/v0.3.0.md) | v0.3.0 发布说明（账号隔离/进度/统计/策略） |
+| [docs/releases/v0.3.1.md](./docs/releases/v0.3.1.md) | v0.3.1 发布说明（可配置手势/全屏修复/逻辑梳理） |
 | [docs/requirements/backlog/v0.1.0.md](./docs/requirements/backlog/v0.1.0.md) | 遗留项、技术债与下版规划 |
 | [docs/requirements/changes/](./docs/requirements/changes/) | 需求变更记录（CR） |
 | [deploy/README.md](./deploy/README.md) | 部署、HTTPS、资源限制与排障 |
@@ -293,7 +295,8 @@ cd web && npx vue-tsc --noEmit
 - **v0.1.0**：Web 端完整可用，后台可管控，日志可诊断
 - **v0.2.0**：手势倍速、全屏按钮、鼠标/键盘控制、会话进度恢复、观看历史独立页、悬停抽帧封面
 - **v0.2.1**：历史实时权限遮挡、Kazumi 式长按倍速（默认 1.5×、松手保持）
-- **v0.3.0（当前）**：历史按账号隔离、每用户进度续播与统计、播放结束行为、极简快进 UI、用户/游客独立时段、文件夹递归导入与热度排行、推荐接口预留
+- **v0.3.0**：历史按账号隔离、每用户进度续播与统计、播放结束行为、极简快进 UI、用户/游客独立时段、文件夹递归导入与热度排行、推荐接口预留
+- **v0.3.1（当前）**：普通/沉浸/全屏三场景手势自定义、双击点赞、全屏首次点击修复、播放器逻辑梳理与收藏清理入口收拢
 - **更远**：PC 端 Tauri 套壳、手机 / 电视端客户端、多实例部署与 PostgreSQL 适配、日志远程聚合
 
 具体条目与前置条件见 [backlog](./docs/requirements/backlog/v0.1.0.md)。

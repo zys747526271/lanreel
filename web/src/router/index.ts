@@ -66,6 +66,12 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '设置与诊断' },
     },
     {
+      path: '/settings/gestures',
+      name: 'gesture-settings',
+      component: () => import('@/views/GestureSettingsView.vue'),
+      meta: { requiresAuth: true, title: '手势与播放操作' },
+    },
+    {
       // 管理后台：路由 + 菜单配置驱动（9.6）
       path: '/admin',
       component: () => import('@/views/admin/AdminLayout.vue'),

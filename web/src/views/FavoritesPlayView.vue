@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ReelSlide from '@/components/reel/ReelSlide.vue'
 import { listFavorites, removeFavorite } from '@/api/favorites'
 import { useAuthStore } from '@/stores/auth'
+import { useFavoritesStore } from '@/stores/favorites'
 import { formatDuration, reasonText } from '@/lib/format'
 import { prefs, exitFullscreen } from '@/lib/prefs'
 import { logger } from '@/lib/logger'
@@ -30,6 +31,7 @@ defineOptions({ name: 'FavoritesPlayView' })
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const favorites = useFavoritesStore()
 /** 播放列表来源：收藏夹或观看历史（KeepAlive 下必须响应 query 变化） */
 const src = computed<'history' | 'favorites'>(() => (route.query.src === 'history' ? 'history' : 'favorites'))
 
@@ -47,19 +49,21 @@ const pendingResumeTime = ref<number | null>(null)
 /** 当前条目是否有可续播进度（用于显示「从头开始」按钮）。 */
 const canRestart = ref(false)
 const immersive = ref(false)
+/** KeepAlive 切走后为 false，阻止后台页面自动播放（v0.3.1）。 */
+const viewActive = ref(true)
 /** KeepAlive 组件只在首次挂载，后续 query 变化需手动重新聚焦条目。 */
 let routeReady = false
 let lastRouteSignature = ''
 let toastTimer: number | null = null
 
 type SlideInstance = InstanceType<typeof ReelSlide>
-const slideRefs = new Map<number, SlideInstance>()
-function setSlideRef(el: unknown, index: number) {
-  if (el) slideRefs.set(index, el as SlideInstance)
-  else slideRefs.delete(index)
+const slideRefs = new Map<string, SlideInstance>()
+function setSlideRef(el: unknown, key: string) {
+  if (el) slideRefs.set(key, el as SlideInstance)
+  else slideRefs.delete(key)
 }
-const activeSlide = computed(() => slideRefs.get(activeIndex.value))
 const currentItem = computed(() => items.value[activeIndex.value])
+const activeSlide = computed(() => slideRefs.get(currentItem.value?.key ?? ''))
 /** 需求 7：收藏按钮显示当前视频收藏数。 */
 const favoriteCount = computed(() => currentItem.value?.favorite_count ?? 0)
 
@@ -247,6 +251,7 @@ async function unfavorite() {
   if (!item) return
   try {
     await removeFavorite(item.key)
+    void favorites.load()
     const removedIndex = activeIndex.value
     items.value = items.value.filter((i) => i.key !== item.key)
     if (!items.value.length) {
@@ -263,7 +268,34 @@ async function unfavorite() {
   }
 }
 
+/** 双击点赞：收藏/取消收藏，收藏来源下取消会同步移出播放列表（v0.3.1）。 */
+async function onToggleFavorite(key: string) {
+  const item = items.value.find((i) => i.key === key)
+  if (!item) return
+  try {
+    const nowFavorite = await favorites.toggle(item)
+    item.favorite = nowFavorite
+    item.favorite_count = Math.max(0, (item.favorite_count ?? 0) + (nowFavorite ? 1 : -1))
+    if (src.value === 'favorites' && !nowFavorite) {
+      const removedIndex = activeIndex.value
+      items.value = items.value.filter((i) => i.key !== key)
+      if (!items.value.length) {
+        back()
+        return
+      }
+      await nextTick()
+      const target = Math.min(removedIndex, items.value.length - 1)
+      activeIndex.value = target
+      scrollToIndex(target, false)
+    }
+    showToast(nowFavorite ? '已收藏' : '已取消收藏')
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '收藏失败')
+  }
+}
+
 function back() {
+  activeSlide.value?.exitFullscreenOwned()
   void exitFullscreen()
   router.replace(src.value === 'history' ? '/history' : '/favorites')
 }
@@ -280,7 +312,7 @@ function toMedia(h: HistoryEntryView): MediaItem {
     size: 0,
     playable: h.playable,
     reason: h.playable ? undefined : h.reason ?? 'unavailable',
-    favorite: false,
+    favorite: favorites.has(h.key),
     favorite_count: h.favorite_count,
     stream_url: h.stream_url,
     thumb_url: h.thumb_url,
@@ -338,6 +370,7 @@ onMounted(async () => {
     router.replace({ path: '/login', query: { redirect: '/favorites' } })
     return
   }
+  if (!favorites.keys.size && !favorites.loading) void favorites.load()
   const saved = loadPlaySession(src.value)
   try {
     items.value = await fetchList()
@@ -385,12 +418,14 @@ function onResize() {
 /** KeepAlive：切走只暂停、切回复用同一个 video 续播。 */
 let resumeOnActivate = false
 function onViewDeactivated() {
+  viewActive.value = false
   resumeOnActivate = !activeSlide.value?.isPaused()
   setImmersive(false)
   saveSession()
   pauseAllVideos()
 }
 function onViewActivated() {
+  viewActive.value = true
   rememberPlayerRoute(route.fullPath)
   if (routeReady && lastRouteSignature !== currentRouteSignature()) {
     lastRouteSignature = currentRouteSignature()
@@ -462,7 +497,7 @@ onBeforeUnmount(() => {
         class="relative h-full w-full snap-start snap-always"
       >
         <ReelSlide
-          :ref="(el) => setSlideRef(el, index)"
+          :ref="(el) => setSlideRef(el, item.key)"
           :item="item"
           :active="index === activeIndex"
           :preload="Math.abs(index - activeIndex) <= 1"
@@ -473,7 +508,9 @@ onBeforeUnmount(() => {
           :resume-time="index === activeIndex ? pendingResumeTime : null"
           :end-action="endAction"
           :immersive="immersive"
+          :view-active="viewActive"
           @toggle-immersive="toggleImmersive"
+          @toggle-favorite="onToggleFavorite"
           @volume-change="onVolumeChange"
           @autoplay-muted="showToast('已静音播放，点击画面开启声音')"
           @advance="next"

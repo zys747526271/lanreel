@@ -40,16 +40,19 @@ const routeLoading = ref(true)
 const positions = ref<Record<string, number>>({})
 const pendingResumeTime = ref<number | null>(null)
 const immersive = ref(false)
+/** KeepAlive 切走后为 false，阻止后台页面自动播放（v0.3.1）。 */
+const viewActive = ref(true)
 let toastTimer: number | null = null
 
 type SlideInstance = InstanceType<typeof ReelSlide>
-const slideRefs = new Map<number, SlideInstance>()
-function setSlideRef(el: unknown, index: number) {
-  if (el) slideRefs.set(index, el as SlideInstance)
-  else slideRefs.delete(index)
+/** 按 key 索引，列表重新随机/重排后不会拿到旧索引上的播放器实例。 */
+const slideRefs = new Map<string, SlideInstance>()
+function setSlideRef(el: unknown, key: string) {
+  if (el) slideRefs.set(key, el as SlideInstance)
+  else slideRefs.delete(key)
 }
-const activeSlide = computed(() => slideRefs.get(activeIndex.value))
 const currentItem = computed(() => feed.items[activeIndex.value])
+const activeSlide = computed(() => slideRefs.get(currentItem.value?.key ?? ''))
 /** 需求 7：收藏按钮显示当前视频的收藏数，而非全站/本人总数。 */
 const favoriteCount = computed(() => currentItem.value?.favorite_count ?? 0)
 /** 需求 3：播放结束行为来自设备偏好。 */
@@ -269,6 +272,8 @@ async function onToggleFavorite(key: string) {
   try {
     const nowFavorite = await favorites.toggle(item)
     feed.patchFavorite(key, nowFavorite)
+    const patched = feed.items.find((i) => i.key === key)
+    if (patched) patched.favorite_count = Math.max(0, (item.favorite_count ?? 0) + (nowFavorite ? 1 : -1))
     showToast(nowFavorite ? '已收藏' : '已取消收藏')
   } catch (err) {
     showToast(err instanceof Error ? err.message : '收藏失败')
@@ -291,7 +296,7 @@ function openList(path: string) {
 /** 下拉刷新：排除当前整批重新随机，避免媒体库较小时刷到同一条看起来没反应。 */
 let refreshingAt = 0
 async function refresh(fromGesture = false) {
-  if (Date.now() - refreshingAt < 700) return
+  if (Date.now() - refreshingAt < 700 || feed.loading) return
   refreshingAt = Date.now()
   const previousKeys = feed.items.map((i) => i.key)
   feed.reset()
@@ -406,12 +411,14 @@ function onResize() {
  */
 let resumeOnActivate = false
 function onViewDeactivated() {
+  viewActive.value = false
   resumeOnActivate = !activeSlide.value?.isPaused()
   setImmersive(false)
   saveSession()
   pauseAllVideos()
 }
 function onViewActivated() {
+  viewActive.value = true
   rememberPlayerRoute(route.fullPath)
   void nextTick(() => {
     scrollToIndex(activeIndex.value, false)
@@ -520,7 +527,7 @@ onBeforeUnmount(() => {
         class="relative h-full w-full snap-start snap-always"
       >
         <ReelSlide
-          :ref="(el) => setSlideRef(el, index)"
+          :ref="(el) => setSlideRef(el, item.key)"
           :item="item"
           :active="index === activeIndex"
           :preload="Math.abs(index - activeIndex) <= 1"
@@ -532,6 +539,7 @@ onBeforeUnmount(() => {
           :end-action="endAction"
           :immersive="immersive"
           :allow-refresh="index === 0"
+          :view-active="viewActive"
           @toggle-immersive="toggleImmersive"
           @refresh="refresh(true)"
           @volume-change="onVolumeChange"

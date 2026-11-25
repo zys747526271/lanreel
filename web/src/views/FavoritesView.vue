@@ -182,14 +182,6 @@ onActivated(() => {
           >
             {{ selectMode ? '退出选择' : '批量管理' }}
           </button>
-          <button
-            v-if="missingItems.length"
-            class="h-10 rounded-full border border-amber-400/40 bg-amber-500/10 px-3 text-xs text-amber-200 transition hover:bg-amber-500/20"
-            :disabled="busy"
-            @click="removeMissing"
-          >
-            清理丢失 {{ missingItems.length }}
-          </button>
         </div>
       </div>
       <!-- 收藏 / 历史互切 -->
@@ -214,8 +206,9 @@ onActivated(() => {
         </button>
         <!-- 批量管理内直接提供一键清理入口，避免窄屏顶部按钮被挤出可视区 -->
         <button
+          v-if="missingItems.length"
           class="rounded-lg border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-40"
-          :disabled="!missingItems.length || busy"
+          :disabled="busy"
           @click="removeMissing"
         >
           一键清除失效视频{{ missingItems.length ? `（${missingItems.length}）` : '' }}
